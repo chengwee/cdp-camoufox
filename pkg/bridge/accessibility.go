@@ -16,9 +16,38 @@ func (b *Bridge) handleAccessibility(conn *cdp.Connection, msg *cdp.Message) (js
 		return json.RawMessage(`{}`), nil
 
 	case "Accessibility.getFullAXTree":
+		var params struct {
+			FrameID string `json:"frameId"`
+		}
+		if len(msg.Params) != 0 && json.Unmarshal(msg.Params, &params) != nil {
+			return nil, &cdp.Error{Code: -32602, Message: "invalid params"}
+		}
+		if !b.isBiDi && params.FrameID != "" {
+			if info, ok := b.sessions.Get(msg.SessionID); ok && b.jugglerFrameIDForSession(msg.SessionID, params.FrameID) != info.FrameID {
+				return nil, &cdp.Error{Code: -32000, Message: "frame-scoped accessibility is not supported by this Camoufox Juggler protocol"}
+			}
+		}
+		var document *domDocument
+		var version int
+		var err error
+		if !b.isBiDi && b.latestContextForSession(msg.SessionID) != "" {
+			document, err = b.domDocumentFor(msg.SessionID, "")
+			if err == nil {
+				version, err = b.domVersion(document)
+			}
+			if err != nil {
+				return nil, &cdp.Error{Code: -32000, Message: err.Error()}
+			}
+		}
 		result, err := b.callJuggler(msg.SessionID, "Accessibility.getFullAXTree", nil)
 		if err != nil {
 			return nil, &cdp.Error{Code: -32000, Message: err.Error()}
+		}
+		if document != nil {
+			result, err = b.associateAccessibilityNodes(msg.SessionID, document, version, result)
+			if err != nil {
+				return nil, &cdp.Error{Code: -32000, Message: err.Error()}
+			}
 		}
 		adapted, err := adaptAccessibilityTreeResult(result)
 		if err != nil {
@@ -59,6 +88,9 @@ func appendAXNode(raw map[string]json.RawMessage, nodes *[]map[string]interface{
 	node := map[string]interface{}{
 		"nodeId":  nodeID,
 		"ignored": false,
+	}
+	if backendID, ok := raw["backendDOMNodeId"]; ok {
+		node["backendDOMNodeId"] = backendID
 	}
 
 	if role := stringAXField(raw, "role"); role != "" {
@@ -117,7 +149,7 @@ func rawAXValue(raw map[string]json.RawMessage, name string) (map[string]interfa
 func axProperties(raw map[string]json.RawMessage) []map[string]interface{} {
 	skip := map[string]bool{
 		"role": true, "name": true, "value": true, "description": true,
-		"children": true, "foundObject": true,
+		"children": true, "foundObject": true, "backendDOMNodeId": true,
 	}
 	properties := make([]map[string]interface{}, 0)
 	for name, data := range raw {

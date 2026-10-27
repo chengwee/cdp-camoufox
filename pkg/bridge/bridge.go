@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/VulpineOS/foxbridge/pkg/backend"
 	"github.com/VulpineOS/foxbridge/pkg/cdp"
@@ -21,11 +22,20 @@ type Bridge struct {
 	autoAttach *autoAttachState
 	ownership  *ownershipRegistry
 	// ctxMap maps numeric CDP execution context IDs to Juggler execution context ID strings
-	ctxMapMu        sync.RWMutex
-	ctxMap          map[int]string    // cdpContextID → jugglerContextID
-	ctxOwners       map[int]string    // cdpContextID → owning CDP session
-	ctxUniqueOwners map[string]string // unique context ID → owning CDP session
-	ctxCounter      int               // monotonic counter for execution context IDs
+	ctxMapMu                 sync.RWMutex
+	ctxMap                   map[int]string    // cdpContextID → jugglerContextID
+	ctxOwners                map[int]string    // cdpContextID → owning CDP session
+	ctxUniqueOwners          map[string]string // unique context ID → owning CDP session
+	contextFrames            map[string]string
+	contextNames             map[string]string
+	frameParents             map[string]string
+	initScriptsMu            sync.Mutex
+	initScripts              map[string][]pageInitScript
+	networkRequestsMu        sync.RWMutex
+	networkRequests          map[string]networkRequestInfo
+	completedRequestSequence uint64
+	startedAt                time.Time
+	ctxCounter               int // monotonic counter for execution context IDs
 	// loaderMap tracks the last loaderId per CDP session for lifecycle event consistency
 	loaderMapMu sync.RWMutex
 	loaderMap   map[string]string // cdpSessionID → last loaderId
@@ -39,17 +49,12 @@ type Bridge struct {
 	// isolatedWorlds tracks isolated world names per CDP session for re-emission after navigation
 	isolatedWorldsMu sync.RWMutex
 	isolatedWorlds   map[string][]isolatedWorldInfo // cdpSessionID → list of isolated worlds
-	// nodeObjects maps backendNodeId → objectId for DOM.describeNode/resolveNode round-trips
-	nodeObjectsMu sync.RWMutex
-	nodeObjects   map[int]string    // backendNodeId → objectId
-	nodeOwners    map[int]string    // backendNodeId → owning CDP session
-	objectOwners  map[string]string // objectId → owning CDP session
-	// lastQuerySelector tracks the last intercepted CSS selector per session
-	// so we can combine querySelector + userFn into a single evaluate for $eval
-	lastQueryMu    sync.RWMutex
-	lastQuery      map[string]string // cdpSessionID → CSS selector
-	lastQueryAll   map[string]bool   // cdpSessionID → true if querySelectorAll
-	lastQuerySkips map[string]int    // cdpSessionID → remaining calls to skip before user fn
+	nodeObjectsMu    sync.RWMutex
+	objectOwners     map[string]string // objectId → owning CDP session
+	objectContexts   map[string]string
+	domMu            sync.Mutex
+	domDocuments     map[string]*domDocument
+	domNodes         map[int]domNodeRef
 	// lastDialogID tracks the last dialog ID per CDP session for handleDialog
 	lastDialogMu sync.Mutex
 	lastDialog   map[string]string // cdpSessionID → dialogId
@@ -102,17 +107,21 @@ func New(b backend.Backend, sessions *cdp.SessionManager, server *cdp.Server, is
 		ctxMap:               make(map[int]string),
 		ctxOwners:            make(map[int]string),
 		ctxUniqueOwners:      make(map[string]string),
+		contextFrames:        make(map[string]string),
+		contextNames:         make(map[string]string),
+		frameParents:         make(map[string]string),
+		initScripts:          make(map[string][]pageInitScript),
+		networkRequests:      make(map[string]networkRequestInfo),
+		startedAt:            time.Now(),
 		ctxCounter:           100,
 		loaderMap:            make(map[string]string),
 		latestCtx:            make(map[string]string),
 		subFrames:            make(map[string]map[string]bool),
 		isolatedWorlds:       make(map[string][]isolatedWorldInfo),
-		nodeObjects:          make(map[int]string),
-		nodeOwners:           make(map[int]string),
 		objectOwners:         make(map[string]string),
-		lastQuery:            make(map[string]string),
-		lastQueryAll:         make(map[string]bool),
-		lastQuerySkips:       make(map[string]int),
+		objectContexts:       make(map[string]string),
+		domDocuments:         make(map[string]*domDocument),
+		domNodes:             make(map[int]domNodeRef),
 		lastDialog:           make(map[string]string),
 		pdfStreams:           make(map[string]string),
 		pdfOwners:            make(map[string]string),
@@ -170,6 +179,8 @@ func (b *Bridge) HandleMessage(conn *cdp.Connection, msg *cdp.Message) {
 		result, cdpErr = b.handleCSS(conn, msg)
 	case strings.HasPrefix(method, "DOMStorage."):
 		result, cdpErr = b.handleDOMStorage(conn, msg)
+	case strings.HasPrefix(method, "Storage."):
+		result, cdpErr = b.handleStorage(conn, msg)
 	default:
 		result, cdpErr = b.handleStub(conn, msg)
 	}
@@ -227,6 +238,7 @@ func (b *Bridge) authorize(conn *cdp.Connection, msg *cdp.Message) *cdp.Error {
 func (b *Bridge) ConnectionClosed(conn *cdp.Connection) {
 	records := b.ownership.closeConnection(conn)
 	for _, record := range records {
+		b.clearDOMSession(record.pageSessionID)
 		b.closeRecord(record, true)
 	}
 	b.disableFetchIfUnused()
@@ -234,6 +246,17 @@ func (b *Bridge) ConnectionClosed(conn *cdp.Connection) {
 
 func (b *Bridge) clearConnectionState(records []*targetRecord) {
 	for _, record := range records {
+		b.clearDOMSession(record.pageSessionID)
+		b.initScriptsMu.Lock()
+		delete(b.initScripts, record.pageSessionID)
+		b.initScriptsMu.Unlock()
+		b.networkRequestsMu.Lock()
+		for key, request := range b.networkRequests {
+			if request.SessionID == record.pageSessionID {
+				delete(b.networkRequests, key)
+			}
+		}
+		b.networkRequestsMu.Unlock()
 		b.loaderMapMu.Lock()
 		delete(b.loaderMap, record.pageSessionID)
 		b.loaderMapMu.Unlock()
@@ -241,12 +264,6 @@ func (b *Bridge) clearConnectionState(records []*targetRecord) {
 		b.isolatedWorldsMu.Lock()
 		delete(b.isolatedWorlds, record.pageSessionID)
 		b.isolatedWorldsMu.Unlock()
-
-		b.lastQueryMu.Lock()
-		delete(b.lastQuery, record.pageSessionID)
-		delete(b.lastQueryAll, record.pageSessionID)
-		delete(b.lastQuerySkips, record.pageSessionID)
-		b.lastQueryMu.Unlock()
 
 		b.lastDialogMu.Lock()
 		delete(b.lastDialog, record.pageSessionID)
@@ -287,12 +304,6 @@ func (b *Bridge) clearConnectionState(records []*targetRecord) {
 		b.ctxMapMu.Unlock()
 
 		b.nodeObjectsMu.Lock()
-		for id, owner := range b.nodeOwners {
-			if owner == record.pageSessionID {
-				delete(b.nodeOwners, id)
-				delete(b.nodeObjects, id)
-			}
-		}
 		for objectID, owner := range b.objectOwners {
 			if owner == record.pageSessionID {
 				delete(b.objectOwners, objectID)
@@ -484,11 +495,22 @@ func (b *Bridge) clearContextsForSession(sessionID string) {
 	b.ctxMapMu.Lock()
 	for id, owner := range b.ctxOwners {
 		if owner == sessionID {
+			contextID := b.ctxMap[id]
+			delete(b.contextFrames, contextID)
+			delete(b.contextNames, contextID)
+			delete(b.ctxUniqueOwners, contextID)
 			delete(b.ctxMap, id)
 			delete(b.ctxOwners, id)
 		}
 	}
 	b.ctxMapMu.Unlock()
+	b.clearDOMSession(sessionID)
+}
+
+func (b *Bridge) frameIDForContext(contextID string) string {
+	b.ctxMapMu.RLock()
+	defer b.ctxMapMu.RUnlock()
+	return b.contextFrames[contextID]
 }
 
 // isolatedWorldInfo tracks an isolated world for re-emission after navigation.

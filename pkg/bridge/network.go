@@ -1,8 +1,10 @@
 package bridge
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/VulpineOS/foxbridge/pkg/cdp"
 )
@@ -177,6 +179,48 @@ func (b *Bridge) handleNetwork(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 			if err := b.authorizeRequest(msg.SessionID, params.RequestID); err != nil {
 				return nil, err
 			}
+		}
+
+		if !b.isBiDi {
+			result, err := b.callJuggler(msg.SessionID, "Network.getResponseBody", map[string]string{
+				"requestId": params.RequestID,
+			})
+			if err != nil {
+				return nil, &cdp.Error{Code: -32000, Message: err.Error()}
+			}
+			var response struct {
+				Base64Body string `json:"base64body"`
+				Evicted    bool   `json:"evicted"`
+			}
+			if err := json.Unmarshal(result, &response); err != nil {
+				return nil, &cdp.Error{Code: -32000, Message: err.Error()}
+			}
+			if response.Evicted {
+				b.forgetNetworkRequest(msg.SessionID, params.RequestID)
+				return nil, &cdp.Error{Code: -32000, Message: "response body was evicted"}
+			}
+			b.networkRequestsMu.RLock()
+			request := b.networkRequests[msg.SessionID+"\x00"+params.RequestID]
+			b.networkRequestsMu.RUnlock()
+			text := response.Base64Body
+			base64Encoded := true
+			if textualMimeType(request.MimeType) {
+				decoded, err := base64.StdEncoding.DecodeString(response.Base64Body)
+				if err != nil {
+					return nil, &cdp.Error{Code: -32000, Message: "invalid base64 response body"}
+				}
+				if utf8.Valid(decoded) {
+					text, base64Encoded = string(decoded), false
+				}
+			}
+			body, err := json.Marshal(struct {
+				Body          string `json:"body"`
+				Base64Encoded bool   `json:"base64Encoded"`
+			}{Body: text, Base64Encoded: base64Encoded})
+			if err != nil {
+				return nil, &cdp.Error{Code: -32000, Message: err.Error()}
+			}
+			return body, nil
 		}
 
 		result, err := b.callJuggler("", "Browser.getResponseBody", map[string]string{

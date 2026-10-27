@@ -1,0 +1,12 @@
+{
+  "name": "foxbridge-stagehand-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 compatibility.test.js",
+    "test:orchestrator": "bun orchestrator-smoke.js"
+  },
+  "dependencies": {
+    "@browserbasehq/stagehand": "3.4.0"
+  }
+}

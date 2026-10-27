@@ -1,11 +1,14 @@
 package bridge
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
 	"sync"
+	"time"
+	"unicode/utf8"
 
 	"github.com/VulpineOS/foxbridge/pkg/cdp"
 	"github.com/google/uuid"
@@ -258,12 +261,14 @@ func (b *Bridge) SetupEventSubscriptions() {
 		}
 
 		// Update session URL
-		if info, ok := b.sessions.GetByJugglerSession(jugglerSessionID); ok {
+		if info, ok := b.sessions.GetByJugglerSession(jugglerSessionID); ok && info.FrameID == ev.FrameID {
 			b.sessions.UpdateURL(info.SessionID, ev.URL)
 		}
 		b.autoAttach.mu.Lock()
 		if pair, ok := b.autoAttach.pairs[jugglerSessionID]; ok {
-			pair.url = ev.URL
+			if info, exists := b.sessions.Get(pair.pageSessionID); exists && info.FrameID == ev.FrameID {
+				pair.url = ev.URL
+			}
 		}
 		b.autoAttach.mu.Unlock()
 
@@ -292,16 +297,23 @@ func (b *Bridge) SetupEventSubscriptions() {
 			"timestamp": 0,
 		}, cdpSessionID)
 
+		frame := map[string]interface{}{
+			"id":                cdpFrameID,
+			"url":               ev.URL,
+			"loaderId":          loaderId,
+			"securityOrigin":    "",
+			"mimeType":          "text/html",
+			"domainAndRegistry": "",
+		}
+		b.ctxMapMu.RLock()
+		parentFrameID := b.frameParents[ev.FrameID]
+		b.ctxMapMu.RUnlock()
+		if parentFrameID != "" {
+			frame["parentId"] = b.cdpFrameIDForJugglerSession(jugglerSessionID, parentFrameID)
+		}
 		b.emitEvent("Page.frameNavigated", map[string]interface{}{
-			"frame": map[string]interface{}{
-				"id":                cdpFrameID,
-				"url":               ev.URL,
-				"loaderId":          loaderId,
-				"securityOrigin":    "",
-				"mimeType":          "text/html",
-				"domainAndRegistry": "",
-			},
-			"type": "Navigation",
+			"frame": frame,
+			"type":  "Navigation",
 		}, cdpSessionID)
 
 		// NOTE: Isolated world re-emission moved to Page.eventFired(load)
@@ -411,13 +423,18 @@ func (b *Bridge) SetupEventSubscriptions() {
 		b.ctxMapMu.Lock()
 		b.ctxMap[ctxID] = ev.ExecutionContextID
 		b.ctxOwners[ctxID] = cdpSessionID
+		b.contextFrames[ev.ExecutionContextID] = ev.AuxData.FrameID
+		b.contextNames[ev.ExecutionContextID] = ev.AuxData.Name
 		b.ctxMapMu.Unlock()
 
-		// Always track the latest context. Juggler creates/destroys contexts rapidly
-		// during navigation — only the last surviving one matters.
-		b.latestCtxMu.Lock()
-		b.latestCtx[jugglerSessionID] = ev.ExecutionContextID
-		b.latestCtxMu.Unlock()
+		if ev.AuxData.Name == "" {
+			info, ok := b.sessions.GetByJugglerSession(jugglerSessionID)
+			if !ok || info.FrameID == "" || info.FrameID == ev.AuxData.FrameID {
+				b.latestCtxMu.Lock()
+				b.latestCtx[jugglerSessionID] = ev.ExecutionContextID
+				b.latestCtxMu.Unlock()
+			}
+		}
 		b.ctxMapMu.Lock()
 		b.ctxUniqueOwners[ev.ExecutionContextID] = cdpSessionID
 		b.ctxMapMu.Unlock()
@@ -431,12 +448,15 @@ func (b *Bridge) SetupEventSubscriptions() {
 				"name":     ev.AuxData.Name,
 				"uniqueId": ev.ExecutionContextID,
 				"auxData": map[string]interface{}{
-					"isDefault": true,
-					"type":      "default",
+					"isDefault": ev.AuxData.Name == "",
+					"type":      contextType(ev.AuxData.Name),
 					"frameId":   cdpFrameID,
 				},
 			},
 		}, cdpSessionID)
+		if !b.isBiDi {
+			return
+		}
 
 		// Re-emit isolated world contexts whenever a new default context appears.
 		// Both Juggler and BiDi need this — after navigation, the utility world context
@@ -522,18 +542,30 @@ func (b *Bridge) SetupEventSubscriptions() {
 				}
 			}
 		} else {
-			// Juggler: clean up only the single mapping
-			if numericID > 0 {
-				b.ctxMapMu.Lock()
-				delete(b.ctxMap, numericID)
-				delete(b.ctxOwners, numericID)
-				b.ctxMapMu.Unlock()
+			var destroyed []int
+			b.ctxMapMu.Lock()
+			for id, contextID := range b.ctxMap {
+				if contextID == ev.ExecutionContextID {
+					destroyed = append(destroyed, id)
+					delete(b.ctxMap, id)
+					delete(b.ctxOwners, id)
+				}
 			}
-
-			b.emitEvent("Runtime.executionContextDestroyed", map[string]interface{}{
-				"executionContextId":       numericID,
-				"executionContextUniqueId": ev.ExecutionContextID,
-			}, cdpSessionID)
+			delete(b.contextFrames, ev.ExecutionContextID)
+			delete(b.contextNames, ev.ExecutionContextID)
+			delete(b.ctxUniqueOwners, ev.ExecutionContextID)
+			b.ctxMapMu.Unlock()
+			b.clearDOMContext(cdpSessionID, ev.ExecutionContextID)
+			b.latestCtxMu.Lock()
+			if b.latestCtx[jugglerSessionID] == ev.ExecutionContextID {
+				delete(b.latestCtx, jugglerSessionID)
+			}
+			b.latestCtxMu.Unlock()
+			for _, id := range destroyed {
+				b.emitEvent("Runtime.executionContextDestroyed", map[string]interface{}{
+					"executionContextId": id, "executionContextUniqueId": ev.ExecutionContextID,
+				}, cdpSessionID)
+			}
 		}
 	})
 
@@ -581,6 +613,9 @@ func (b *Bridge) SetupEventSubscriptions() {
 		cdpSessionID := b.resolveCDPSession(jugglerSessionID)
 		cdpFrameID := b.cdpFrameIDForJugglerSession(jugglerSessionID, ev.FrameID)
 		cdpParentFrameID := b.cdpFrameIDForJugglerSession(jugglerSessionID, ev.ParentFrameID)
+		b.ctxMapMu.Lock()
+		b.frameParents[ev.FrameID] = ev.ParentFrameID
+		b.ctxMapMu.Unlock()
 
 		b.emitEvent("Page.frameAttached", map[string]interface{}{
 			"frameId":       cdpFrameID,
@@ -706,26 +741,44 @@ func (b *Bridge) SetupEventSubscriptions() {
 			}, cdpSessionID)
 		}
 
-		resourceType := "Document"
+		resourceType := networkResourceType(ev.Cause)
 		if isWebSocket {
 			resourceType = "WebSocket"
-		} else if !ev.IsNavigation && ev.NavigationID == "" {
-			resourceType = "Other"
+		} else if ev.IsNavigation || ev.NavigationID != "" {
+			resourceType = "Document"
+		}
+		b.networkRequestsMu.Lock()
+		b.networkRequests[cdpSessionID+"\x00"+ev.RequestID] = networkRequestInfo{SessionID: cdpSessionID, URL: ev.URL, FrameID: cdpFrameID, ResourceType: resourceType}
+		b.networkRequestsMu.Unlock()
+		requestPayload := map[string]interface{}{
+			"url": ev.URL, "method": ev.Method, "headers": cdpHeaders,
+			"initialPriority": "High", "referrerPolicy": "strict-origin-when-cross-origin",
+		}
+		if ev.PostData != "" {
+			body := []byte(ev.PostData)
+			if !b.isBiDi {
+				var err error
+				body, err = base64.StdEncoding.DecodeString(ev.PostData)
+				if err != nil {
+					log.Printf("events: invalid request body encoding: %v", err)
+					return
+				}
+			}
+			requestPayload["hasPostData"] = true
+			if utf8.Valid(body) {
+				requestPayload["postData"] = string(body)
+			} else {
+				requestPayload["postDataEntries"] = []map[string]string{{"bytes": base64.StdEncoding.EncodeToString(body)}}
+			}
 		}
 
 		b.emitEvent("Network.requestWillBeSent", map[string]interface{}{
 			"requestId":   ev.RequestID,
 			"loaderId":    ev.RequestID,
 			"documentURL": ev.URL,
-			"request": map[string]interface{}{
-				"url":             ev.URL,
-				"method":          ev.Method,
-				"headers":         cdpHeaders,
-				"initialPriority": "High",
-				"referrerPolicy":  "strict-origin-when-cross-origin",
-			},
-			"timestamp": 0,
-			"wallTime":  0,
+			"request":     requestPayload,
+			"timestamp":   b.networkTimestamp(),
+			"wallTime":    float64(time.Now().UnixNano()) / 1e9,
 			"initiator": map[string]interface{}{
 				"type": "other",
 			},
@@ -753,20 +806,10 @@ func (b *Bridge) SetupEventSubscriptions() {
 				return
 			}
 
-			request := map[string]interface{}{
-				"url":             ev.URL,
-				"method":          ev.Method,
-				"headers":         cdpHeaders,
-				"initialPriority": "High",
-				"referrerPolicy":  "strict-origin-when-cross-origin",
-			}
-			if ev.PostData != "" {
-				request["postData"] = ev.PostData
-			}
 			b.emitEvent("Fetch.requestPaused", map[string]interface{}{
 				"requestId":    ev.RequestID,
 				"networkId":    ev.RequestID,
-				"request":      request,
+				"request":      requestPayload,
 				"frameId":      cdpFrameID,
 				"resourceType": resourceType,
 			}, cdpSessionID)
@@ -776,14 +819,14 @@ func (b *Bridge) SetupEventSubscriptions() {
 	// Network.responseReceived → Network.responseReceived
 	b.backend.Subscribe("Network.responseReceived", func(jugglerSessionID string, params json.RawMessage) {
 		var ev struct {
-			RequestID       string            `json:"requestId"`
-			SecurityDetails json.RawMessage   `json:"securityDetails"`
-			FromCache       bool              `json:"fromCache"`
-			Headers         map[string]string `json:"headers"`
-			Status          int               `json:"status"`
-			StatusText      string            `json:"statusText"`
-			URL             string            `json:"url"`
-			FrameID         string            `json:"frameId"`
+			RequestID       string          `json:"requestId"`
+			SecurityDetails json.RawMessage `json:"securityDetails"`
+			FromCache       bool            `json:"fromCache"`
+			Headers         json.RawMessage `json:"headers"`
+			Status          int             `json:"status"`
+			StatusText      string          `json:"statusText"`
+			URL             string          `json:"url"`
+			FrameID         string          `json:"frameId"`
 		}
 		if err := json.Unmarshal(params, &ev); err != nil {
 			return
@@ -791,18 +834,41 @@ func (b *Bridge) SetupEventSubscriptions() {
 
 		cdpSessionID := b.resolveCDPSession(jugglerSessionID)
 		cdpFrameID := b.cdpFrameIDForJugglerSession(jugglerSessionID, ev.FrameID)
+		b.networkRequestsMu.RLock()
+		request := b.networkRequests[cdpSessionID+"\x00"+ev.RequestID]
+		b.networkRequestsMu.RUnlock()
+		if ev.URL == "" {
+			ev.URL = request.URL
+		}
+		if cdpFrameID == "" {
+			cdpFrameID = request.FrameID
+		}
+		resourceType := request.ResourceType
+		if resourceType == "" {
+			resourceType = "Other"
+		}
+		headers := networkHeaders(ev.Headers)
+		mimeType := responseMimeType(headers)
+		request.MimeType = mimeType
+		request.SessionID = cdpSessionID
+		b.networkRequestsMu.Lock()
+		if retained, exists := b.networkRequests[cdpSessionID+"\x00"+ev.RequestID]; exists {
+			retained.MimeType = mimeType
+			b.networkRequests[cdpSessionID+"\x00"+ev.RequestID] = retained
+		}
+		b.networkRequestsMu.Unlock()
 
 		b.emitEvent("Network.responseReceived", map[string]interface{}{
 			"requestId": ev.RequestID,
 			"loaderId":  ev.RequestID,
-			"timestamp": 0,
-			"type":      "Document",
+			"timestamp": b.networkTimestamp(),
+			"type":      resourceType,
 			"response": map[string]interface{}{
 				"url":               ev.URL,
 				"status":            ev.Status,
 				"statusText":        ev.StatusText,
-				"headers":           ev.Headers,
-				"mimeType":          "",
+				"headers":           headers,
+				"mimeType":          mimeType,
 				"connectionReused":  false,
 				"connectionId":      0,
 				"encodedDataLength": 0,
@@ -818,17 +884,24 @@ func (b *Bridge) SetupEventSubscriptions() {
 	// Network.requestFinished → Network.loadingFinished
 	b.backend.Subscribe("Network.requestFinished", func(jugglerSessionID string, params json.RawMessage) {
 		var ev struct {
-			RequestID string `json:"requestId"`
+			RequestID       string `json:"requestId"`
+			TransferSize    int64  `json:"transferSize"`
+			EncodedBodySize int64  `json:"encodedBodySize"`
 		}
 		json.Unmarshal(params, &ev)
 
 		cdpSessionID := b.resolveCDPSession(jugglerSessionID)
+		b.emitEvent("Network.dataReceived", map[string]interface{}{
+			"requestId": ev.RequestID, "timestamp": b.networkTimestamp(),
+			"dataLength": ev.EncodedBodySize, "encodedDataLength": ev.EncodedBodySize,
+		}, cdpSessionID)
 
 		b.emitEvent("Network.loadingFinished", map[string]interface{}{
 			"requestId":         ev.RequestID,
-			"timestamp":         0,
-			"encodedDataLength": 0,
+			"timestamp":         b.networkTimestamp(),
+			"encodedDataLength": ev.TransferSize,
 		}, cdpSessionID)
+		b.finishNetworkRequest(cdpSessionID, ev.RequestID)
 	})
 
 	// Network.requestFailed → Network.loadingFailed
@@ -848,7 +921,7 @@ func (b *Bridge) SetupEventSubscriptions() {
 			"errorText": ev.ErrorCode,
 			"canceled":  false,
 		}, cdpSessionID)
-		b.ownership.clearRequest(ev.RequestID)
+		b.forgetNetworkRequest(cdpSessionID, ev.RequestID)
 	})
 
 	// WebSocket events → Network.webSocket* CDP events

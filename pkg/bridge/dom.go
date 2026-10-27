@@ -3,701 +3,351 @@ package bridge
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/VulpineOS/foxbridge/pkg/cdp"
 )
 
-func (b *Bridge) handleDOM(conn *cdp.Connection, msg *cdp.Message) (json.RawMessage, *cdp.Error) {
-	switch msg.Method {
-	case "DOM.enable", "DOM.disable":
-		return json.RawMessage(`{}`), nil
+type domNodeParams struct {
+	NodeID             int      `json:"nodeId"`
+	BackendNodeID      int      `json:"backendNodeId"`
+	ObjectID           string   `json:"objectId"`
+	Depth              int      `json:"depth"`
+	Selector           string   `json:"selector"`
+	Name               string   `json:"name"`
+	Value              string   `json:"value"`
+	OuterHTML          string   `json:"outerHTML"`
+	Files              []string `json:"files"`
+	FrameID            string   `json:"frameId"`
+	ExecutionContextID int      `json:"executionContextId"`
+}
 
-	case "DOM.getDocument":
-		// Evaluate to get document info via Runtime.evaluate.
-		expr := `(function() {
-			return JSON.stringify({
-				title: document.title,
-				url: document.location.href,
-				baseURL: document.baseURI
-			});
-		})()`
-
-		result, err := b.callJuggler(msg.SessionID, "Runtime.evaluate", map[string]interface{}{
-			"expression":    expr,
-			"returnByValue": true,
-		})
-		if err != nil {
-			// Fallback to a minimal document node.
-			return marshalResult(map[string]interface{}{
-				"root": map[string]interface{}{
-					"nodeId":         1,
-					"backendNodeId":  1,
-					"nodeType":       9,
-					"nodeName":       "#document",
-					"localName":      "",
-					"nodeValue":      "",
-					"childNodeCount": 1,
-					"documentURL":    "",
-					"baseURL":        "",
-					"children": []interface{}{
-						map[string]interface{}{
-							"nodeId":         2,
-							"backendNodeId":  2,
-							"nodeType":       1,
-							"nodeName":       "HTML",
-							"localName":      "html",
-							"nodeValue":      "",
-							"childNodeCount": 2,
-						},
-					},
-				},
-			})
-		}
-
-		// Parse the evaluate result to extract document info.
-		var evalResult struct {
-			Result struct {
-				Value json.RawMessage `json:"value"`
-			} `json:"result"`
-		}
-		json.Unmarshal(result, &evalResult)
-
-		var docInfo struct {
-			Title   string `json:"title"`
-			URL     string `json:"url"`
-			BaseURL string `json:"baseURL"`
-		}
-		if evalResult.Result.Value != nil {
-			// Value may be a string (JSON-encoded) or an object.
-			var strVal string
-			if json.Unmarshal(evalResult.Result.Value, &strVal) == nil {
-				json.Unmarshal([]byte(strVal), &docInfo)
-			} else {
-				json.Unmarshal(evalResult.Result.Value, &docInfo)
-			}
-		}
-
-		return marshalResult(map[string]interface{}{
-			"root": map[string]interface{}{
-				"nodeId":         1,
-				"backendNodeId":  1,
-				"nodeType":       9,
-				"nodeName":       "#document",
-				"localName":      "",
-				"nodeValue":      "",
-				"childNodeCount": 1,
-				"documentURL":    docInfo.URL,
-				"baseURL":        docInfo.BaseURL,
-				"children": []interface{}{
-					map[string]interface{}{
-						"nodeId":         2,
-						"backendNodeId":  2,
-						"nodeType":       1,
-						"nodeName":       "HTML",
-						"localName":      "html",
-						"nodeValue":      "",
-						"childNodeCount": 2,
-					},
-				},
-			},
-		})
-
-	case "DOM.querySelector":
-		var params struct {
-			NodeID   int    `json:"nodeId"`
-			Selector string `json:"selector"`
-		}
-		if err := json.Unmarshal(msg.Params, &params); err != nil {
-			return nil, &cdp.Error{Code: -32602, Message: "invalid params"}
-		}
-
-		// Check if element exists
-		expr := fmt.Sprintf(`document.querySelector(%q) !== null`, params.Selector)
-		result, err := b.callJuggler(msg.SessionID, "Runtime.evaluate", map[string]interface{}{
-			"expression":    expr,
-			"returnByValue": true,
-		})
-		if err != nil {
-			return nil, &cdp.Error{Code: -32000, Message: err.Error()}
-		}
-
-		var evalResult struct {
-			Result struct {
-				Value json.RawMessage `json:"value"`
-			} `json:"result"`
-		}
-		json.Unmarshal(result, &evalResult)
-
-		var found bool
-		if evalResult.Result.Value != nil {
-			json.Unmarshal(evalResult.Result.Value, &found)
-		}
-
-		nodeID := 0
-		if found {
-			// Allocate a unique node ID using the context counter
-			nodeID = b.nextCtxID()
-		}
-
-		return marshalResult(map[string]interface{}{
-			"nodeId": nodeID,
-		})
-
-	case "DOM.querySelectorAll":
-		var params struct {
-			NodeID   int    `json:"nodeId"`
-			Selector string `json:"selector"`
-		}
-		if err := json.Unmarshal(msg.Params, &params); err != nil {
-			return nil, &cdp.Error{Code: -32602, Message: "invalid params"}
-		}
-
-		// Return node IDs starting from 3 for each match
-		expr := fmt.Sprintf(`document.querySelectorAll(%q).length`, params.Selector)
-		result, err := b.callJuggler(msg.SessionID, "Runtime.evaluate", map[string]interface{}{
-			"expression":    expr,
-			"returnByValue": true,
-		})
-		if err != nil {
-			return marshalResult(map[string]interface{}{"nodeIds": []int{}})
-		}
-
-		var evalResult struct {
-			Result struct {
-				Value json.RawMessage `json:"value"`
-			} `json:"result"`
-		}
-		json.Unmarshal(result, &evalResult)
-
-		var count int
-		if evalResult.Result.Value != nil {
-			json.Unmarshal(evalResult.Result.Value, &count)
-		}
-
-		nodeIDs := make([]int, count)
-		for i := range nodeIDs {
-			nodeIDs[i] = 3 + i
-		}
-		return marshalResult(map[string]interface{}{"nodeIds": nodeIDs})
-
-	case "DOM.describeNode", "Page.describeNode":
-		var params struct {
-			NodeID        int    `json:"nodeId"`
-			BackendNodeID int    `json:"backendNodeId"`
-			ObjectID      string `json:"objectId"`
-			Depth         int    `json:"depth"`
-		}
-		if msg.Params != nil {
-			json.Unmarshal(msg.Params, &params)
-		}
-
-		// Assign a unique backendNodeId and store the objectId mapping
-		// so DOM.resolveNode can return the original object later
-		if params.BackendNodeID == 0 {
-			params.BackendNodeID = b.nextCtxID() // reuse counter for unique IDs
-		}
-		if params.ObjectID != "" {
-			b.nodeObjectsMu.Lock()
-			b.nodeObjects[params.BackendNodeID] = params.ObjectID
-			b.nodeOwners[params.BackendNodeID] = msg.SessionID
-			b.objectOwners[params.ObjectID] = msg.SessionID
-			b.nodeObjectsMu.Unlock()
-		}
-
-		// Try Juggler's Page.describeNode first — it supports contentFrameId for iframes
-		if params.ObjectID != "" {
-			jugglerResult, jugglerErr := b.callJuggler(msg.SessionID, "Page.describeNode", map[string]interface{}{
-				"objectId": params.ObjectID,
-			})
-			if jugglerErr == nil {
-				// Parse Juggler result and merge with our node IDs
-				var jugglerNode struct {
-					ContentFrameID string `json:"contentFrameId"`
-				}
-				json.Unmarshal(jugglerResult, &jugglerNode)
-
-				// Still get DOM info via callFunction for full node details
-				expr := `function() {
-					var n = this;
-					return JSON.stringify({
-						nodeType: n.nodeType,
-						nodeName: n.nodeName,
-						localName: n.localName || '',
-						nodeValue: n.nodeValue || '',
-						childCount: n.childNodes ? n.childNodes.length : 0,
-						attrs: (function() {
-							var a = [];
-							if (n.attributes) {
-								for (var i = 0; i < n.attributes.length; i++) {
-									a.push(n.attributes[i].name, n.attributes[i].value);
-								}
-							}
-							return a;
-						})()
-					});
-				}`
-				result, err := b.callJuggler(msg.SessionID, "Runtime.callFunction", map[string]interface{}{
-					"functionDeclaration": expr,
-					"objectId":            params.ObjectID,
-					"returnByValue":       true,
-				})
-				if err == nil {
-					var callResult struct {
-						Result struct {
-							Value json.RawMessage `json:"value"`
-						} `json:"result"`
-					}
-					json.Unmarshal(result, &callResult)
-
-					var nodeInfo struct {
-						NodeType   int      `json:"nodeType"`
-						NodeName   string   `json:"nodeName"`
-						LocalName  string   `json:"localName"`
-						NodeValue  string   `json:"nodeValue"`
-						ChildCount int      `json:"childCount"`
-						Attrs      []string `json:"attrs"`
-					}
-					if callResult.Result.Value != nil {
-						var strVal string
-						if json.Unmarshal(callResult.Result.Value, &strVal) == nil {
-							json.Unmarshal([]byte(strVal), &nodeInfo)
-						} else {
-							json.Unmarshal(callResult.Result.Value, &nodeInfo)
-						}
-					}
-
-					node := map[string]interface{}{
-						"nodeId":         params.NodeID,
-						"backendNodeId":  params.BackendNodeID,
-						"nodeType":       nodeInfo.NodeType,
-						"nodeName":       nodeInfo.NodeName,
-						"localName":      nodeInfo.LocalName,
-						"nodeValue":      nodeInfo.NodeValue,
-						"childNodeCount": nodeInfo.ChildCount,
-						"attributes":     nodeInfo.Attrs,
-					}
-					if jugglerNode.ContentFrameID != "" {
-						node["contentFrameId"] = jugglerNode.ContentFrameID
-					}
-
-					return marshalResult(map[string]interface{}{
-						"node": node,
-					})
-				}
-			}
-		}
-
-		// Fallback: get info via Runtime.callFunction without Juggler describeNode
-		if params.ObjectID != "" {
-			expr := `function() {
-				var n = this;
-				return JSON.stringify({
-					nodeType: n.nodeType,
-					nodeName: n.nodeName,
-					localName: n.localName || '',
-					nodeValue: n.nodeValue || '',
-					childCount: n.childNodes ? n.childNodes.length : 0,
-					attrs: (function() {
-						var a = [];
-						if (n.attributes) {
-							for (var i = 0; i < n.attributes.length; i++) {
-								a.push(n.attributes[i].name, n.attributes[i].value);
-							}
-						}
-						return a;
-					})()
-				});
-			}`
-			result, err := b.callJuggler(msg.SessionID, "Runtime.callFunction", map[string]interface{}{
-				"functionDeclaration": expr,
-				"objectId":            params.ObjectID,
-				"returnByValue":       true,
-			})
-			if err == nil {
-				var callResult struct {
-					Result struct {
-						Value json.RawMessage `json:"value"`
-					} `json:"result"`
-				}
-				json.Unmarshal(result, &callResult)
-
-				var nodeInfo struct {
-					NodeType   int      `json:"nodeType"`
-					NodeName   string   `json:"nodeName"`
-					LocalName  string   `json:"localName"`
-					NodeValue  string   `json:"nodeValue"`
-					ChildCount int      `json:"childCount"`
-					Attrs      []string `json:"attrs"`
-				}
-				if callResult.Result.Value != nil {
-					var strVal string
-					if json.Unmarshal(callResult.Result.Value, &strVal) == nil {
-						json.Unmarshal([]byte(strVal), &nodeInfo)
-					} else {
-						json.Unmarshal(callResult.Result.Value, &nodeInfo)
-					}
-				}
-
-				return marshalResult(map[string]interface{}{
-					"node": map[string]interface{}{
-						"nodeId":         params.NodeID,
-						"backendNodeId":  params.BackendNodeID,
-						"nodeType":       nodeInfo.NodeType,
-						"nodeName":       nodeInfo.NodeName,
-						"localName":      nodeInfo.LocalName,
-						"nodeValue":      nodeInfo.NodeValue,
-						"childNodeCount": nodeInfo.ChildCount,
-						"attributes":     nodeInfo.Attrs,
-					},
-				})
-			}
-		}
-
-		// Fallback for node IDs without object reference
-		return marshalResult(map[string]interface{}{
-			"node": map[string]interface{}{
-				"nodeId":         params.NodeID,
-				"backendNodeId":  params.BackendNodeID,
-				"nodeType":       1,
-				"nodeName":       "DIV",
-				"localName":      "div",
-				"nodeValue":      "",
-				"childNodeCount": 0,
-				"attributes":     []string{},
-			},
-		})
-
-	case "DOM.resolveNode":
-		var params struct {
-			NodeID        int    `json:"nodeId"`
-			BackendNodeID int    `json:"backendNodeId"`
-			ObjectGroup   string `json:"objectGroup"`
-		}
-		if msg.Params != nil {
-			json.Unmarshal(msg.Params, &params)
-		}
-
-		// Check if we have a stored objectId from a previous DOM.describeNode call.
-		// This ensures resolveNode returns the SAME element, not just `document`.
-		b.nodeObjectsMu.RLock()
-		storedObjectID := b.nodeObjects[params.BackendNodeID]
-		storedOwner := b.nodeOwners[params.BackendNodeID]
-		b.nodeObjectsMu.RUnlock()
-		if storedOwner != "" && storedOwner != msg.SessionID {
-			return nil, &cdp.Error{Code: -32000, Message: "node not found"}
-		}
-
-		if storedObjectID != "" {
-			return marshalResult(map[string]interface{}{
-				"object": map[string]interface{}{
-					"type":     "object",
-					"subtype":  "node",
-					"objectId": storedObjectID,
-				},
-			})
-		}
-
-		// No stored objectId — evaluate document as fallback
-		expr := "document"
-		if params.NodeID == 2 || params.BackendNodeID == 2 {
-			expr = "document.documentElement"
-		}
-
-		execCtx := b.latestContextForSession(msg.SessionID)
-		evalParams := map[string]interface{}{
-			"expression":    expr,
-			"returnByValue": false,
-		}
-		if execCtx != "" {
-			evalParams["executionContextId"] = execCtx
-		}
-		result, err := b.callJuggler(msg.SessionID, "Runtime.evaluate", evalParams)
-		if err == nil {
-			var evalResult struct {
-				Result struct {
-					ObjectID string `json:"objectId"`
-					Type     string `json:"type"`
-				} `json:"result"`
-			}
-			json.Unmarshal(result, &evalResult)
-			if evalResult.Result.ObjectID != "" {
-				return marshalResult(map[string]interface{}{
-					"object": map[string]interface{}{
-						"type":     evalResult.Result.Type,
-						"subtype":  "node",
-						"objectId": evalResult.Result.ObjectID,
-					},
-				})
-			}
-		}
-
-		return marshalResult(map[string]interface{}{
-			"object": map[string]interface{}{
-				"type":     "object",
-				"subtype":  "node",
-				"objectId": fmt.Sprintf("node-%d", params.NodeID),
-			},
-		})
-
-	case "DOM.getBoxModel":
-		var params struct {
-			NodeID        int    `json:"nodeId"`
-			BackendNodeID int    `json:"backendNodeId"`
-			ObjectID      string `json:"objectId"`
-		}
-		if msg.Params != nil {
-			json.Unmarshal(msg.Params, &params)
-		}
-
-		// If we have an objectId, get bounding rect via callFunction
-		if params.ObjectID != "" {
-			expr := `function() {
-				var r = this.getBoundingClientRect();
-				return JSON.stringify({x: r.x, y: r.y, w: r.width, h: r.height});
-			}`
-			result, err := b.callJuggler(msg.SessionID, "Runtime.callFunction", map[string]interface{}{
-				"functionDeclaration": expr,
-				"objectId":            params.ObjectID,
-				"returnByValue":       true,
-			})
-			if err == nil {
-				var callResult struct {
-					Result struct {
-						Value json.RawMessage `json:"value"`
-					} `json:"result"`
-				}
-				json.Unmarshal(result, &callResult)
-
-				var rect struct {
-					X float64 `json:"x"`
-					Y float64 `json:"y"`
-					W float64 `json:"w"`
-					H float64 `json:"h"`
-				}
-				if callResult.Result.Value != nil {
-					var strVal string
-					if json.Unmarshal(callResult.Result.Value, &strVal) == nil {
-						json.Unmarshal([]byte(strVal), &rect)
-					} else {
-						json.Unmarshal(callResult.Result.Value, &rect)
-					}
-				}
-
-				// Box model quads: content, padding, border, margin (all same for simplicity)
-				quad := []float64{
-					rect.X, rect.Y,
-					rect.X + rect.W, rect.Y,
-					rect.X + rect.W, rect.Y + rect.H,
-					rect.X, rect.Y + rect.H,
-				}
-				return marshalResult(map[string]interface{}{
-					"model": map[string]interface{}{
-						"content": quad,
-						"padding": quad,
-						"border":  quad,
-						"margin":  quad,
-						"width":   int(rect.W),
-						"height":  int(rect.H),
-					},
-				})
-			}
-		}
-
-		// Fallback
-		quad := []float64{0, 0, 100, 0, 100, 100, 0, 100}
-		return marshalResult(map[string]interface{}{
-			"model": map[string]interface{}{
-				"content": quad,
-				"padding": quad,
-				"border":  quad,
-				"margin":  quad,
-				"width":   100,
-				"height":  100,
-			},
-		})
-
-	case "DOM.getAttributes":
-		var params struct {
-			NodeID int `json:"nodeId"`
-		}
-		if err := json.Unmarshal(msg.Params, &params); err != nil {
-			return nil, &cdp.Error{Code: -32602, Message: "invalid params"}
-		}
-
-		// Without real node references, return empty attributes.
-		return marshalResult(map[string]interface{}{
-			"attributes": []string{},
-		})
-
-	case "DOM.removeNode":
-		var params struct {
-			NodeID int `json:"nodeId"`
-		}
-		if msg.Params != nil {
-			json.Unmarshal(msg.Params, &params)
-		}
-		return json.RawMessage(`{}`), nil
-
-	case "DOM.setAttributeValue":
-		var params struct {
-			NodeID int    `json:"nodeId"`
-			Name   string `json:"name"`
-			Value  string `json:"value"`
-		}
-		if msg.Params != nil {
-			json.Unmarshal(msg.Params, &params)
-		}
-		return json.RawMessage(`{}`), nil
-
-	case "DOM.setNodeValue":
-		return json.RawMessage(`{}`), nil
-
-	case "DOM.getOuterHTML":
-		var params struct {
-			NodeID        int    `json:"nodeId"`
-			BackendNodeID int    `json:"backendNodeId"`
-			ObjectID      string `json:"objectId"`
-		}
-		if msg.Params != nil {
-			json.Unmarshal(msg.Params, &params)
-		}
-
-		if params.ObjectID != "" {
-			result, err := b.callJuggler(msg.SessionID, "Runtime.callFunction", map[string]interface{}{
-				"functionDeclaration": `function() { return this.outerHTML; }`,
-				"objectId":            params.ObjectID,
-				"returnByValue":       true,
-			})
-			if err == nil {
-				var callResult struct {
-					Result struct {
-						Value json.RawMessage `json:"value"`
-					} `json:"result"`
-				}
-				json.Unmarshal(result, &callResult)
-				var html string
-				if callResult.Result.Value != nil {
-					json.Unmarshal(callResult.Result.Value, &html)
-				}
-				return marshalResult(map[string]string{"outerHTML": html})
-			}
-		}
-		return marshalResult(map[string]string{"outerHTML": ""})
-
-	case "DOM.setOuterHTML":
-		return json.RawMessage(`{}`), nil
-
-	case "DOM.getContentQuads":
-		var params struct {
-			NodeID        int    `json:"nodeId"`
-			BackendNodeID int    `json:"backendNodeId"`
-			ObjectID      string `json:"objectId"`
-		}
-		if msg.Params != nil {
-			json.Unmarshal(msg.Params, &params)
-		}
-
-		if params.ObjectID != "" {
-			expr := `function() {
-				var r = this.getBoundingClientRect();
-				return JSON.stringify([r.x, r.y, r.x + r.width, r.y, r.x + r.width, r.y + r.height, r.x, r.y + r.height]);
-			}`
-			result, err := b.callJuggler(msg.SessionID, "Runtime.callFunction", map[string]interface{}{
-				"functionDeclaration": expr,
-				"objectId":            params.ObjectID,
-				"returnByValue":       true,
-			})
-			if err == nil {
-				var callResult struct {
-					Result struct {
-						Value json.RawMessage `json:"value"`
-					} `json:"result"`
-				}
-				json.Unmarshal(result, &callResult)
-
-				var quad []float64
-				if callResult.Result.Value != nil {
-					var strVal string
-					if json.Unmarshal(callResult.Result.Value, &strVal) == nil {
-						json.Unmarshal([]byte(strVal), &quad)
-					} else {
-						json.Unmarshal(callResult.Result.Value, &quad)
-					}
-				}
-				if len(quad) == 8 {
-					return marshalResult(map[string]interface{}{
-						"quads": [][]float64{quad},
-					})
-				}
-			}
-		}
-
-		return marshalResult(map[string]interface{}{
-			"quads": [][]float64{{0, 0, 100, 0, 100, 100, 0, 100}},
-		})
-
-	case "DOM.scrollIntoViewIfNeeded":
-		var params struct {
-			NodeID        int    `json:"nodeId"`
-			BackendNodeID int    `json:"backendNodeId"`
-			ObjectID      string `json:"objectId"`
-		}
-		if msg.Params != nil {
-			json.Unmarshal(msg.Params, &params)
-		}
-
-		if params.ObjectID != "" {
-			b.callJuggler(msg.SessionID, "Runtime.callFunction", map[string]interface{}{
-				"functionDeclaration": `function() { this.scrollIntoViewIfNeeded(true); }`,
-				"objectId":            params.ObjectID,
-				"returnByValue":       true,
-			})
-		}
-		return json.RawMessage(`{}`), nil
-
-	case "DOM.focus":
-		var params struct {
-			NodeID        int    `json:"nodeId"`
-			BackendNodeID int    `json:"backendNodeId"`
-			ObjectID      string `json:"objectId"`
-		}
-		if msg.Params != nil {
-			json.Unmarshal(msg.Params, &params)
-		}
-
-		if params.ObjectID != "" {
-			b.callJuggler(msg.SessionID, "Runtime.callFunction", map[string]interface{}{
-				"functionDeclaration": `function() { this.focus(); }`,
-				"objectId":            params.ObjectID,
-				"returnByValue":       true,
-			})
-		}
-		return json.RawMessage(`{}`), nil
-
-	case "DOM.setFileInputFiles":
-		var params struct {
-			Files         []string `json:"files"`
-			NodeID        int      `json:"nodeId"`
-			BackendNodeID int      `json:"backendNodeId"`
-			ObjectID      string   `json:"objectId"`
-		}
-		if msg.Params != nil {
-			json.Unmarshal(msg.Params, &params)
-		}
-
-		if params.ObjectID != "" {
-			// Juggler has Page.setFileInputFiles
-			_, err := b.callJuggler(msg.SessionID, "Page.setFileInputFiles", map[string]interface{}{
-				"objectId": params.ObjectID,
-				"files":    params.Files,
-			})
-			if err != nil {
-				return nil, &cdp.Error{Code: -32000, Message: err.Error()}
-			}
-		}
-		return json.RawMessage(`{}`), nil
-
-	default:
-		return nil, &cdp.Error{Code: -32601, Message: fmt.Sprintf("method not found: %s", msg.Method)}
+func (b *Bridge) callDOMFunction(sessionID string, params map[string]interface{}) (json.RawMessage, error) {
+	objectID, _ := params["objectId"].(string)
+	declaration, _ := params["functionDeclaration"].(string)
+	b.nodeObjectsMu.RLock()
+	owner := b.objectOwners[objectID]
+	contextID := b.objectContexts[objectID]
+	b.nodeObjectsMu.RUnlock()
+	if owner != "" && owner != sessionID {
+		return nil, fmt.Errorf("object not found")
 	}
+	if contextID == "" {
+		contextID = b.latestContextForSession(sessionID)
+	}
+	delete(params, "objectId")
+	params["functionDeclaration"] = fmt.Sprintf(`function(node) { return (%s).call(node); }`, declaration)
+	params["args"] = []map[string]string{{"objectId": objectID}}
+	params["executionContextId"] = contextID
+	result, err := b.callJuggler(sessionID, "Runtime.callFunction", params)
+	if err != nil {
+		return nil, err
+	}
+	_, err = decodeRemote(result)
+	return result, err
+}
+
+func (b *Bridge) handleDOM(conn *cdp.Connection, msg *cdp.Message) (json.RawMessage, *cdp.Error) {
+	if msg.Method == "DOM.enable" || msg.Method == "DOM.disable" {
+		return json.RawMessage(`{}`), nil
+	}
+	var params domNodeParams
+	if len(msg.Params) > 0 && json.Unmarshal(msg.Params, &params) != nil {
+		return nil, &cdp.Error{Code: -32602, Message: "invalid params"}
+	}
+	result, err := b.domOperation(msg.SessionID, msg.Method, params)
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "method not found:") {
+			return nil, &cdp.Error{Code: -32601, Message: err.Error()}
+		}
+		return nil, &cdp.Error{Code: -32000, Message: err.Error()}
+	}
+	return result, nil
+}
+
+func (b *Bridge) domOperation(sessionID, method string, params domNodeParams) (json.RawMessage, error) {
+	if method == "DOM.getDocument" {
+		document, err := b.domDocumentFor(sessionID, "")
+		if err != nil {
+			return nil, err
+		}
+		depth := params.Depth
+		if depth == 0 {
+			depth = 1
+		}
+		node, err := b.describeDOM(document, 0, depth)
+		if err != nil {
+			return nil, err
+		}
+		result, _ := json.Marshal(map[string]interface{}{"root": node})
+		return result, nil
+	}
+
+	if method == "DOM.getFrameOwner" {
+		return b.frameOwner(sessionID, params.FrameID)
+	}
+
+	known := map[string]bool{
+		"DOM.describeNode": true, "Page.describeNode": true, "DOM.resolveNode": true,
+		"DOM.requestNode": true, "DOM.querySelector": true, "DOM.querySelectorAll": true,
+		"DOM.getBoxModel": true, "DOM.getContentQuads": true, "DOM.scrollIntoViewIfNeeded": true,
+		"DOM.focus": true, "DOM.getAttributes": true, "DOM.getOuterHTML": true,
+		"DOM.setAttributeValue": true, "DOM.setNodeValue": true, "DOM.setOuterHTML": true,
+		"DOM.removeNode": true, "DOM.setFileInputFiles": true,
+	}
+	if !known[method] {
+		return nil, fmt.Errorf("method not found: %s", method)
+	}
+	var reference domNodeRef
+	var err error
+	if params.ObjectID != "" {
+		reference, err = b.referenceForObject(sessionID, params.ObjectID)
+	} else {
+		nodeID := params.BackendNodeID
+		if nodeID == 0 {
+			nodeID = params.NodeID
+		}
+		reference, err = b.domReference(sessionID, nodeID)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	switch method {
+	case "DOM.describeNode", "Page.describeNode", "DOM.requestNode":
+		node, err := b.describeDOM(reference.document, reference.localID, params.Depth)
+		if err != nil {
+			return nil, err
+		}
+		if method == "DOM.requestNode" {
+			return json.Marshal(map[string]interface{}{"nodeId": node["nodeId"]})
+		}
+		if node["nodeName"] == "IFRAME" || node["nodeName"] == "FRAME" {
+			object, err := b.callRegistry(reference.document, `function(registry, id) { return registry.node(id); }`, []map[string]interface{}{{"value": reference.localID}}, false)
+			if err != nil {
+				return nil, err
+			}
+			defer b.callJuggler(sessionID, "Runtime.disposeObject", map[string]interface{}{"executionContextId": reference.document.contextID, "objectId": object.ObjectID})
+			result, err := b.callJuggler(sessionID, "Page.describeNode", map[string]interface{}{"frameId": b.frameIDForContext(reference.document.contextID), "objectId": object.ObjectID})
+			if err != nil {
+				return nil, err
+			}
+			var frame struct {
+				ContentFrameID string `json:"contentFrameId"`
+			}
+			if err := json.Unmarshal(result, &frame); err != nil {
+				return nil, err
+			}
+			if frame.ContentFrameID != "" {
+				node["frameId"] = b.cdpFrameIDForSession(sessionID, frame.ContentFrameID)
+				node["contentFrameId"] = frame.ContentFrameID
+			}
+		}
+		return json.Marshal(map[string]interface{}{"node": node})
+	case "DOM.resolveNode":
+		object, err := b.callRegistry(reference.document, `function(registry, id) { return registry.node(id); }`, []map[string]interface{}{{"value": reference.localID}}, false)
+		if err != nil {
+			return nil, err
+		}
+		if params.ExecutionContextID != 0 {
+			b.ctxMapMu.RLock()
+			contextID := b.ctxMap[params.ExecutionContextID]
+			owner := b.ctxOwners[params.ExecutionContextID]
+			b.ctxMapMu.RUnlock()
+			if contextID == "" || owner != sessionID {
+				return nil, fmt.Errorf("execution context not found")
+			}
+			if contextID != reference.document.contextID {
+				original := object.ObjectID
+				defer b.callJuggler(sessionID, "Runtime.disposeObject", map[string]interface{}{"executionContextId": reference.document.contextID, "objectId": original})
+				adopted, err := b.callJuggler(sessionID, "Page.adoptNode", map[string]interface{}{"frameId": b.frameIDForContext(reference.document.contextID), "objectId": original, "executionContextId": contextID})
+				if err != nil {
+					return nil, err
+				}
+				var response struct {
+					RemoteObject *remoteObject `json:"remoteObject"`
+				}
+				if err := json.Unmarshal(adopted, &response); err != nil {
+					return nil, err
+				}
+				if response.RemoteObject == nil {
+					return nil, fmt.Errorf("cannot adopt DOM node into requested context")
+				}
+				object = *response.RemoteObject
+				b.rememberRuntimeObject(sessionID, contextID, mustMarshal(map[string]interface{}{"result": object}))
+			}
+		}
+		return json.Marshal(map[string]interface{}{"object": object})
+	case "DOM.querySelector", "DOM.querySelectorAll":
+		object, err := b.callRegistry(reference.document, `function(registry, id, selector, all) {
+			const root = registry.node(id);
+			return Array.from(all ? root.querySelectorAll(selector) : [root.querySelector(selector)]).filter(Boolean).map(node => registry.describe(node, 0));
+		}`, []map[string]interface{}{{"value": reference.localID}, {"value": params.Selector}, {"value": method == "DOM.querySelectorAll"}}, true)
+		if err != nil {
+			return nil, err
+		}
+		var nodes []map[string]interface{}
+		if err := json.Unmarshal(object.Value, &nodes); err != nil {
+			return nil, err
+		}
+		ids := make([]int, 0, len(nodes))
+		for _, node := range nodes {
+			b.registerDOMTree(reference.document, node)
+			ids = append(ids, node["nodeId"].(int))
+		}
+		if method == "DOM.querySelectorAll" {
+			return json.Marshal(map[string]interface{}{"nodeIds": ids})
+		}
+		id := 0
+		if len(ids) > 0 {
+			id = ids[0]
+		}
+		return json.Marshal(map[string]interface{}{"nodeId": id})
+	}
+
+	object, err := b.callRegistry(reference.document, `function(registry, id) { return registry.node(id); }`, []map[string]interface{}{{"value": reference.localID}}, false)
+	if err != nil {
+		return nil, err
+	}
+	defer b.callJuggler(sessionID, "Runtime.disposeObject", map[string]interface{}{"executionContextId": reference.document.contextID, "objectId": object.ObjectID})
+	var declaration string
+	switch method {
+	case "DOM.getBoxModel", "DOM.getContentQuads":
+		result, err := b.callJuggler(sessionID, "Page.getContentQuads", map[string]interface{}{"frameId": b.frameIDForContext(reference.document.contextID), "objectId": object.ObjectID})
+		if err != nil {
+			return nil, err
+		}
+		var geometry struct {
+			Quads []struct{ P1, P2, P3, P4 struct{ X, Y float64 } } `json:"quads"`
+		}
+		if err := json.Unmarshal(result, &geometry); err != nil {
+			return nil, err
+		}
+		if len(geometry.Quads) == 0 {
+			return nil, fmt.Errorf("node has no layout")
+		}
+		quads := make([][]float64, 0, len(geometry.Quads))
+		for _, quad := range geometry.Quads {
+			quads = append(quads, []float64{quad.P1.X, quad.P1.Y, quad.P2.X, quad.P2.Y, quad.P3.X, quad.P3.Y, quad.P4.X, quad.P4.Y})
+		}
+		if method == "DOM.getContentQuads" {
+			return json.Marshal(map[string]interface{}{"quads": quads})
+		}
+		dimensionsResult, err := b.callDOMFunction(sessionID, map[string]interface{}{"objectId": object.ObjectID, "returnByValue": true, "functionDeclaration": `function() {
+			if (typeof this.offsetWidth === 'number') return {width: this.offsetWidth, height: this.offsetHeight};
+			if (this instanceof SVGSVGElement && !this.ownerSVGElement) {
+				const style = getComputedStyle(this);
+				const horizontal = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) + parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth);
+				const vertical = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) + parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+				const width = parseFloat(style.width);
+				const height = parseFloat(style.height);
+				return {
+					width: Math.round(style.boxSizing === 'border-box' ? Math.max(width, horizontal) : width + horizontal),
+					height: Math.round(style.boxSizing === 'border-box' ? Math.max(height, vertical) : height + vertical)
+				};
+			}
+			const bounds = this.getBBox();
+			return {width: Math.round(bounds.width), height: Math.round(bounds.height)};
+		}`})
+		if err != nil {
+			return nil, err
+		}
+		dimensions, err := decodeRemote(dimensionsResult)
+		if err != nil {
+			return nil, err
+		}
+		var size struct {
+			Width  int `json:"width"`
+			Height int `json:"height"`
+		}
+		if err := json.Unmarshal(dimensions.Value, &size); err != nil {
+			return nil, err
+		}
+		content := quads[0]
+		return json.Marshal(map[string]interface{}{"model": map[string]interface{}{"content": content, "padding": content, "border": content, "margin": content, "width": size.Width, "height": size.Height}})
+	case "DOM.scrollIntoViewIfNeeded":
+		// Firefox can apply a preceding focus operation's scroll on the next paint.
+		// Let it settle before scrolling this target, or it can undo our scroll
+		// between measuring the element and dispatching the pointer event.
+		_, err := b.callDOMFunction(sessionID, map[string]interface{}{"objectId": object.ObjectID, "returnByValue": true, "functionDeclaration": `async function() {
+			await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+		}`})
+		if err != nil {
+			return nil, err
+		}
+		return b.callJuggler(sessionID, "Page.scrollIntoViewIfNeeded", map[string]interface{}{"frameId": b.frameIDForContext(reference.document.contextID), "objectId": object.ObjectID})
+	case "DOM.focus":
+		declaration = `function() { this.focus(); }`
+	case "DOM.getAttributes":
+		declaration = `function() { return Array.from(this.attributes || []).flatMap(attribute => [attribute.name, attribute.value]); }`
+	case "DOM.getOuterHTML":
+		declaration = `function() { return this.outerHTML; }`
+	case "DOM.setAttributeValue":
+		declaration = fmt.Sprintf(`function() { this.setAttribute(%q, %q); }`, params.Name, params.Value)
+	case "DOM.setNodeValue":
+		declaration = fmt.Sprintf(`function() { this.nodeValue = %q; }`, params.Value)
+	case "DOM.setOuterHTML":
+		declaration = fmt.Sprintf(`function() { this.outerHTML = %q; }`, params.OuterHTML)
+	case "DOM.removeNode":
+		declaration = `function() { this.remove(); }`
+	case "DOM.setFileInputFiles":
+		return b.callJuggler(sessionID, "Page.setFileInputFiles", map[string]interface{}{"objectId": object.ObjectID, "files": params.Files})
+	}
+	result, err := b.callDOMFunction(sessionID, map[string]interface{}{"objectId": object.ObjectID, "functionDeclaration": declaration, "returnByValue": true})
+	if err != nil {
+		return nil, err
+	}
+	value, err := decodeRemote(result)
+	if err != nil {
+		return nil, err
+	}
+	switch method {
+	case "DOM.getAttributes":
+		return json.Marshal(map[string]interface{}{"attributes": value.Value})
+	case "DOM.getOuterHTML":
+		return json.Marshal(map[string]interface{}{"outerHTML": value.Value})
+	default:
+		return json.RawMessage(`{}`), nil
+	}
+}
+
+func (b *Bridge) frameOwner(sessionID, frameID string) (json.RawMessage, error) {
+	document, err := b.domDocumentFor(sessionID, "")
+	if err != nil {
+		return nil, err
+	}
+	root, err := b.describeDOM(document, 0, 1)
+	if err != nil {
+		return nil, err
+	}
+	result, err := b.domOperation(sessionID, "DOM.querySelectorAll", domNodeParams{NodeID: root["nodeId"].(int), Selector: "iframe,frame"})
+	if err != nil {
+		return nil, err
+	}
+	var matches struct {
+		NodeIDs []int `json:"nodeIds"`
+	}
+	if err := json.Unmarshal(result, &matches); err != nil {
+		return nil, err
+	}
+	for _, nodeID := range matches.NodeIDs {
+		object, err := b.domObject(sessionID, nodeID)
+		if err != nil {
+			return nil, err
+		}
+		var frame struct {
+			ContentFrameID string `json:"contentFrameId"`
+		}
+		description, err := b.callJuggler(sessionID, "Page.describeNode", map[string]interface{}{"objectId": object.ObjectID, "frameId": b.frameIDForContext(document.contextID)})
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(description, &frame); err != nil {
+			return nil, err
+		}
+		if frame.ContentFrameID == frameID {
+			return json.Marshal(map[string]interface{}{"backendNodeId": nodeID, "nodeId": nodeID})
+		}
+	}
+	return nil, fmt.Errorf("frame owner not found")
 }

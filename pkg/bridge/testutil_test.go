@@ -23,14 +23,23 @@ type mockBackend struct {
 	calls    []mockCall
 	handlers map[string][]backend.EventHandler
 	// responses maps "sessionID:method" to a preconfigured response.
-	responses map[string]mockCall
+	responses      map[string]mockCall
+	responseQueues map[string][]mockCall
 }
 
 func newMockBackend() *mockBackend {
 	return &mockBackend{
-		handlers:  make(map[string][]backend.EventHandler),
-		responses: make(map[string]mockCall),
+		handlers:       make(map[string][]backend.EventHandler),
+		responses:      make(map[string]mockCall),
+		responseQueues: make(map[string][]mockCall),
 	}
+}
+
+func (m *mockBackend) QueueResponse(sessionID, method string, result json.RawMessage, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := sessionID + ":" + method
+	m.responseQueues[key] = append(m.responseQueues[key], mockCall{Result: result, Err: err})
 }
 
 // SetResponse preconfigures a response for a given sessionID+method pair.
@@ -53,6 +62,13 @@ func (m *mockBackend) Call(sessionID, method string, params json.RawMessage) (js
 
 	// Check for preconfigured response
 	key := sessionID + ":" + method
+	if queue := m.responseQueues[key]; len(queue) > 0 {
+		response := queue[0]
+		m.responseQueues[key] = queue[1:]
+		call.Result, call.Err = response.Result, response.Err
+		m.calls = append(m.calls, call)
+		return response.Result, response.Err
+	}
 	if resp, ok := m.responses[key]; ok {
 		call.Result = resp.Result
 		call.Err = resp.Err

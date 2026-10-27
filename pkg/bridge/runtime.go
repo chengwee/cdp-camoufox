@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/VulpineOS/foxbridge/pkg/cdp"
 )
@@ -87,12 +86,13 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 				execCtxID = mapped
 			}
 			b.ctxMapMu.RUnlock()
+			if execCtxID == "" {
+				return nil, &cdp.Error{Code: -32000, Message: "execution context not found"}
+			}
 		}
 
-		// Always prefer the latest context to avoid stale context errors after navigation
-		latest := b.latestContextForSession(msg.SessionID)
-		if latest != "" {
-			execCtxID = latest
+		if execCtxID == "" {
+			execCtxID = b.latestContextForSession(msg.SessionID)
 		}
 
 		// A session that has just attached may not have seen its first
@@ -136,6 +136,7 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 		}
 
 		log.Printf("[runtime] evaluate result: %s", string(result)[:min(len(result), 300)])
+		b.rememberRuntimeObject(msg.SessionID, execCtxID, result)
 		return normalizeRuntimeResult(result), nil
 
 	case "Runtime.callFunctionOn":
@@ -175,11 +176,12 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 				execCtxID = mapped
 			}
 			b.ctxMapMu.RUnlock()
+			if execCtxID == "" {
+				return nil, &cdp.Error{Code: -32000, Message: "execution context not found"}
+			}
 		}
 
-		// If we have a context ID but no objectId, always use the LATEST context
-		// to avoid stale context errors after navigation
-		if params.ObjectID == "" {
+		if params.ObjectID == "" && execCtxID == "" {
 			latest := b.latestContextForSession(msg.SessionID)
 			if latest != "" {
 				execCtxID = latest
@@ -195,171 +197,6 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 		}
 		if idx := strings.Index(funcDecl, "\n//@ sourceURL="); idx >= 0 {
 			funcDecl = funcDecl[:idx]
-		}
-
-		// The $eval combine pattern is only needed for the Juggler backend.
-		// BiDi handles $eval natively via isolated worlds + script.callFunction.
-		pendingSelector := ""
-		pendingAll := false
-		isPuppeteerInternal := false
-		if !b.isBiDi {
-			// Check if there's a pending $eval selector — if so, combine querySelector + userFn
-			// into a single evaluate to avoid Juggler's object lifecycle issues.
-			b.lastQueryMu.RLock()
-			pendingSelector = b.lastQuery[msg.SessionID]
-			pendingAll = b.lastQueryAll[msg.SessionID]
-			b.lastQueryMu.RUnlock()
-
-			// Match on function BODY content (sourceURL is stripped before this point)
-			isPuppeteerInternal = strings.Contains(funcDecl, "addPageBinding") ||
-				strings.Contains(funcDecl, "puppeteer_") ||
-				strings.Contains(funcDecl, "__ariaQuery") ||
-				strings.Contains(funcDecl, "yield* iterable") || // transposeIterableHandle
-				strings.Contains(funcDecl, "iterator.next()") || // fastTransposeIteratorHandle
-				strings.Contains(funcDecl, "element.isConnected") || // assertConnectedElement
-				strings.Contains(funcDecl, "instanceof SVGElement") || // asSVGElementHandle
-				strings.Contains(funcDecl, "IntersectionObserver") || // scrollIntoView/visibility
-				strings.Contains(funcDecl, "getClientRects") || // clickableBox
-				strings.Contains(funcDecl, "clientWidth") || // intersectBoundingBoxes
-				strings.Contains(funcDecl, "checkVisibility")
-		}
-
-		// If a pending selector exists but the next call is a Puppeteer internal function,
-		// it means this is $() or $$() not $eval/$$eval — clear the pending selector
-		if pendingSelector != "" && isPuppeteerInternal {
-			b.lastQueryMu.Lock()
-			delete(b.lastQuery, msg.SessionID)
-			delete(b.lastQueryAll, msg.SessionID)
-			delete(b.lastQuerySkips, msg.SessionID)
-			b.lastQueryMu.Unlock()
-			pendingSelector = ""
-		}
-
-		if pendingSelector != "" && !strings.Contains(funcDecl, "cssQuerySelector") && !isPuppeteerInternal {
-			// For $$eval, Puppeteer sends 2 internal plumbing calls (iterator + collector)
-			// before the user function. Skip them by counting.
-			b.lastQueryMu.RLock()
-			skipsRemaining := b.lastQuerySkips[msg.SessionID]
-			b.lastQueryMu.RUnlock()
-
-			if skipsRemaining > 0 {
-				b.lastQueryMu.Lock()
-				b.lastQuerySkips[msg.SessionID]--
-				b.lastQueryMu.Unlock()
-				log.Printf("[runtime] skipping $$eval plumbing call (%d remaining)", skipsRemaining-1)
-				return marshalResult(map[string]interface{}{
-					"result": map[string]interface{}{
-						"type": "object",
-					},
-				})
-			}
-
-			// This is the user's function — combine with the stored selector
-			b.lastQueryMu.Lock()
-			delete(b.lastQuery, msg.SessionID)
-			delete(b.lastQueryAll, msg.SessionID)
-			b.lastQueryMu.Unlock()
-
-			log.Printf("[runtime] combining $eval: selector=%q all=%v fn=%s", pendingSelector, pendingAll, funcDecl[:min(len(funcDecl), 60)])
-
-			var expr string
-			if pendingAll {
-				expr = fmt.Sprintf(`(function() { const els = document.querySelectorAll(%q); return (%s)(Array.from(els)); })()`, pendingSelector, funcDecl)
-			} else {
-				expr = fmt.Sprintf(`(function() { const el = document.querySelector(%q); return (%s)(el); })()`, pendingSelector, funcDecl)
-			}
-
-			evalParams := map[string]interface{}{
-				"expression":    expr,
-				"returnByValue": params.ReturnByValue,
-			}
-			if latest := b.latestContextForSession(msg.SessionID); latest != "" {
-				evalParams["executionContextId"] = latest
-			}
-			result, err := b.callJuggler(msg.SessionID, "Runtime.evaluate", evalParams)
-			if err != nil {
-				// Retry once with fresh latest context — setContent may have changed it
-				if strings.Contains(err.Error(), "Failed to find execution context") {
-					time.Sleep(100 * time.Millisecond)
-					if latest := b.latestContextForSession(msg.SessionID); latest != "" {
-						evalParams["executionContextId"] = latest
-					}
-					result, err = b.callJuggler(msg.SessionID, "Runtime.evaluate", evalParams)
-				}
-				if err != nil {
-					return nil, &cdp.Error{Code: -32000, Message: err.Error()}
-				}
-			}
-			return normalizeRuntimeResult(result), nil
-		}
-
-		// Intercept Puppeteer's cssQuerySelector pattern — store the selector for the
-		// NEXT callFunctionOn which will be the user's function ($eval pattern).
-		// Only needed for Juggler backend.
-		if !b.isBiDi && strings.Contains(funcDecl, "cssQuerySelector") && params.Arguments != nil {
-			var args []json.RawMessage
-			if json.Unmarshal(params.Arguments, &args) == nil && len(args) >= 2 {
-				var selectorArg struct {
-					Value string `json:"value"`
-				}
-				json.Unmarshal(args[1], &selectorArg)
-				if selectorArg.Value != "" {
-					isAll := strings.Contains(funcDecl, "cssQuerySelectorAll")
-					log.Printf("[runtime] storing $eval selector %q (all=%v) for next callFunctionOn", selectorArg.Value, isAll)
-
-					b.lastQueryMu.Lock()
-					b.lastQuery[msg.SessionID] = selectorArg.Value
-					b.lastQueryAll[msg.SessionID] = isAll
-					b.lastQueryMu.Unlock()
-
-					// For $$eval, skip 3 plumbing calls (iterator + collector + mapper)
-					// For $eval, skip 0
-					skips := 0
-					if isAll {
-						skips = 3
-					}
-					b.lastQueryMu.Lock()
-					b.lastQuerySkips[msg.SessionID] = skips
-					b.lastQueryMu.Unlock()
-
-					// Execute the real querySelector via Juggler so $() and $$() get real handles.
-					// The stored selector is still available for $eval/$$eval combine.
-					var expr string
-					if isAll {
-						expr = fmt.Sprintf(`document.querySelectorAll(%q)`, selectorArg.Value)
-					} else {
-						expr = fmt.Sprintf(`document.querySelector(%q)`, selectorArg.Value)
-					}
-					evalParams := map[string]interface{}{
-						"expression":    expr,
-						"returnByValue": false,
-					}
-					if latest := b.latestContextForSession(msg.SessionID); latest != "" {
-						evalParams["executionContextId"] = latest
-					}
-					result, err := b.callJuggler(msg.SessionID, "Runtime.evaluate", evalParams)
-					if err != nil {
-						return nil, &cdp.Error{Code: -32000, Message: err.Error()}
-					}
-					// Store the objectId to prevent it from being released prematurely.
-					// $() and $$() need the handle to survive through describeNode/resolveNode
-					// and transposeIterableHandle calls.
-					var evalResult struct {
-						Result struct {
-							ObjectID string `json:"objectId"`
-						} `json:"result"`
-					}
-					if json.Unmarshal(result, &evalResult) == nil && evalResult.Result.ObjectID != "" {
-						backendID := b.nextCtxID()
-						b.nodeObjectsMu.Lock()
-						b.nodeObjects[backendID] = evalResult.Result.ObjectID
-						b.nodeOwners[backendID] = msg.SessionID
-						b.objectOwners[evalResult.Result.ObjectID] = msg.SessionID
-						b.nodeObjectsMu.Unlock()
-					}
-					return normalizeRuntimeResult(result), nil
-				}
-			}
 		}
 
 		// Handle objectId-as-this: Juggler doesn't support objectId for `this` binding.
@@ -400,16 +237,18 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 			hasObjectIdArgs = strings.Contains(string(finalArgs), `"objectId"`)
 		}
 		if hasObjectIdArgs || params.ObjectID != "" {
-			// Object handles from our querySelector interception live in the latest context.
-			// The caller might request a utility world context (mapped to a stale Juggler ID).
-			// For Juggler (not BiDi), prefer latest context since all worlds share the same
-			// underlying JavaScript environment. For BiDi, use the caller's context.
 			if !b.isBiDi {
-				if latest := b.latestContextForSession(msg.SessionID); latest != "" {
-					jugglerParams["executionContextId"] = latest
-				} else if execCtxID != "" {
-					jugglerParams["executionContextId"] = execCtxID
+				contextID, err := b.contextForObjects(msg.SessionID, params.ObjectID, finalArgs)
+				if err != nil {
+					return nil, &cdp.Error{Code: -32000, Message: err.Error()}
 				}
+				if contextID == "" {
+					contextID = execCtxID
+				}
+				if contextID == "" {
+					contextID = b.latestContextForSession(msg.SessionID)
+				}
+				jugglerParams["executionContextId"] = contextID
 			} else if execCtxID != "" {
 				jugglerParams["executionContextId"] = execCtxID
 			} else {
@@ -418,11 +257,10 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 				}
 			}
 		} else {
-			latest := b.latestContextForSession(msg.SessionID)
-			if latest != "" {
-				jugglerParams["executionContextId"] = latest
-			} else if execCtxID != "" {
+			if execCtxID != "" {
 				jugglerParams["executionContextId"] = execCtxID
+			} else if latest := b.latestContextForSession(msg.SessionID); latest != "" {
+				jugglerParams["executionContextId"] = latest
 			}
 		}
 
@@ -435,6 +273,8 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 			return nil, &cdp.Error{Code: -32000, Message: err.Error()}
 		}
 
+		contextID, _ := jugglerParams["executionContextId"].(string)
+		b.rememberRuntimeObject(msg.SessionID, contextID, result)
 		return normalizeRuntimeResult(result), nil
 
 	case "Runtime.releaseObject":
@@ -451,35 +291,27 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 		}
 		b.nodeObjectsMu.RLock()
 		objectOwner := b.objectOwners[params.ObjectID]
+		objectContext := b.objectContexts[params.ObjectID]
 		b.nodeObjectsMu.RUnlock()
 		if objectOwner != "" && objectOwner != msg.SessionID {
 			return nil, &cdp.Error{Code: -32000, Message: "object not found"}
 		}
 
-		// Skip releasing objectIds stored in nodeObjects — these are element handles
-		// from querySelector that are reused by describeNode/resolveNode/click flows.
-		// Releasing them would break subsequent callFunctionOn calls with the same handle.
-		b.nodeObjectsMu.RLock()
-		isStored := false
-		for _, storedID := range b.nodeObjects {
-			if storedID == params.ObjectID {
-				isStored = true
-				break
-			}
-		}
-		b.nodeObjectsMu.RUnlock()
-		if isStored {
-			return json.RawMessage(`{}`), nil
-		}
-
 		disposeParams := map[string]interface{}{
 			"objectId": params.ObjectID,
 		}
-		if latest := b.latestContextForSession(msg.SessionID); latest != "" {
-			disposeParams["executionContextId"] = latest
+		if objectContext == "" {
+			objectContext = b.latestContextForSession(msg.SessionID)
+		}
+		if objectContext != "" {
+			disposeParams["executionContextId"] = objectContext
 		}
 		// Gracefully handle dispose errors — the object may already be gone
 		b.callJuggler(msg.SessionID, "Runtime.disposeObject", disposeParams)
+		b.nodeObjectsMu.Lock()
+		delete(b.objectOwners, params.ObjectID)
+		delete(b.objectContexts, params.ObjectID)
+		b.nodeObjectsMu.Unlock()
 		return json.RawMessage(`{}`), nil
 
 	case "Runtime.getProperties":
@@ -497,13 +329,22 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 		if params.ObjectID == "" {
 			return marshalResult(map[string]interface{}{"result": []interface{}{}})
 		}
+		b.nodeObjectsMu.RLock()
+		owner := b.objectOwners[params.ObjectID]
+		contextID := b.objectContexts[params.ObjectID]
+		b.nodeObjectsMu.RUnlock()
+		if owner != "" && owner != msg.SessionID {
+			return nil, &cdp.Error{Code: -32000, Message: "object not found"}
+		}
 
 		getPropsParams := map[string]interface{}{
 			"objectId": params.ObjectID,
 		}
-		latest := b.latestContextForSession(msg.SessionID)
-		if latest != "" {
-			getPropsParams["executionContextId"] = latest
+		if contextID == "" {
+			contextID = b.latestContextForSession(msg.SessionID)
+		}
+		if contextID != "" {
+			getPropsParams["executionContextId"] = contextID
 		}
 		result, err := b.callJuggler(msg.SessionID, "Runtime.getObjectProperties", getPropsParams)
 		if err != nil {
@@ -521,6 +362,7 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 		if json.Unmarshal(result, &jugglerProps) == nil && jugglerProps.Properties != nil {
 			cdpProps := make([]map[string]interface{}, 0, len(jugglerProps.Properties))
 			for _, p := range jugglerProps.Properties {
+				b.rememberRuntimeObject(msg.SessionID, contextID, mustMarshal(map[string]interface{}{"result": p.Value}))
 				cdpProps = append(cdpProps, map[string]interface{}{
 					"name":         p.Name,
 					"value":        p.Value,

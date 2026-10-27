@@ -11,6 +11,9 @@ import (
 )
 
 func (b *Bridge) handlePage(conn *cdp.Connection, msg *cdp.Message) (json.RawMessage, *cdp.Error) {
+	if !b.isBiDi && (msg.Method == "Page.createIsolatedWorld" || msg.Method == "Page.addScriptToEvaluateOnNewDocument" || msg.Method == "Page.removeScriptToEvaluateOnNewDocument") {
+		return b.handlePageScripts(msg)
+	}
 	switch msg.Method {
 	case "Page.enable", "Page.setLifecycleEventsEnabled":
 		// No-op — Juggler always emits lifecycle events.
@@ -167,13 +170,6 @@ func (b *Bridge) handlePage(conn *cdp.Connection, msg *cdp.Message) (json.RawMes
 		return json.RawMessage(`{}`), nil
 
 	case "Page.close":
-		// Clean up any pending $eval state for this session
-		b.lastQueryMu.Lock()
-		delete(b.lastQuery, msg.SessionID)
-		delete(b.lastQueryAll, msg.SessionID)
-		delete(b.lastQuerySkips, msg.SessionID)
-		b.lastQueryMu.Unlock()
-
 		if record := b.ownership.recordForSession(msg.SessionID); record != nil {
 			b.closeRecord(record, true)
 			return json.RawMessage(`{}`), nil

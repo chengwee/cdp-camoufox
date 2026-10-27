@@ -10,7 +10,7 @@
 
 const puppeteer = require('puppeteer-core');
 
-const WS_ENDPOINT = 'ws://127.0.0.1:9222/devtools/browser/foxbridge';
+const WS_ENDPOINT = process.env.FOXBRIDGE_CDP_URL || 'ws://127.0.0.1:9222/devtools/browser/foxbridge';
 let browser, passed = 0, failed = 0, skipped = 0;
 
 async function test(name, fn) {

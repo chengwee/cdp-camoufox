@@ -290,8 +290,7 @@ func TestHandlePage_ScreenshotJpeg(t *testing.T) {
 func TestHandlePage_AddScriptToEvaluateOnNewDocument(t *testing.T) {
 	b, mb := newTestBridge()
 
-	mb.SetResponse("", "Page.addScriptToEvaluateOnNewDocument",
-		json.RawMessage(`{"scriptId":"script-42"}`), nil)
+	mb.SetResponse("", "Page.setInitScripts", json.RawMessage(`{}`), nil)
 
 	msg := &cdp.Message{
 		ID:     1,
@@ -308,8 +307,21 @@ func TestHandlePage_AddScriptToEvaluateOnNewDocument(t *testing.T) {
 		Identifier string `json:"identifier"`
 	}
 	json.Unmarshal(result, &res)
-	if res.Identifier != "script-42" {
-		t.Errorf("identifier = %q, want script-42", res.Identifier)
+	if res.Identifier == "" {
+		t.Fatal("script has no identifier")
+	}
+	calls := mb.CallsForMethod("Page.setInitScripts")
+	if len(calls) != 1 {
+		t.Fatalf("setInitScripts calls = %d, want 1", len(calls))
+	}
+	var params struct {
+		Scripts []pageInitScript `json:"scripts"`
+	}
+	if err := json.Unmarshal(calls[0].Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if len(params.Scripts) != 1 || params.Scripts[0].Script != "console.log('hi')" {
+		t.Fatalf("unexpected init scripts: %+v", params.Scripts)
 	}
 }
 
@@ -363,6 +375,10 @@ func TestHandlePage_Enable(t *testing.T) {
 
 func TestHandlePage_CreateIsolatedWorld(t *testing.T) {
 	b, _ := newTestBridge()
+	b.ctxMap[201] = "utility-context"
+	b.ctxOwners[201] = "s1"
+	b.contextFrames["utility-context"] = "frame-1"
+	b.contextNames["utility-context"] = "utility"
 
 	msg := &cdp.Message{
 		ID:        1,
@@ -381,11 +397,11 @@ func TestHandlePage_CreateIsolatedWorld(t *testing.T) {
 	}
 	json.Unmarshal(result, &res)
 
-	if res.ExecutionContextID <= 100 {
-		t.Errorf("executionContextId = %d, want > 100", res.ExecutionContextID)
+	if res.ExecutionContextID != 201 {
+		t.Errorf("executionContextId = %d, want existing context 201", res.ExecutionContextID)
 	}
 
-	// Second call should produce a different (higher) ID
+	// A second request for the same live world reuses its native context.
 	result2, cdpErr2 := b.handlePage(nil, msg)
 	if cdpErr2 != nil {
 		t.Fatalf("second call error: %s", cdpErr2.Message)
@@ -395,12 +411,10 @@ func TestHandlePage_CreateIsolatedWorld(t *testing.T) {
 	}
 	json.Unmarshal(result2, &res2)
 
-	if res2.ExecutionContextID <= res.ExecutionContextID {
-		t.Errorf("second id %d should be > first id %d", res2.ExecutionContextID, res.ExecutionContextID)
+	if res2.ExecutionContextID != res.ExecutionContextID {
+		t.Errorf("second id %d should equal first id %d", res2.ExecutionContextID, res.ExecutionContextID)
 	}
 
-	// Wait briefly for the async event emission goroutine
-	time.Sleep(50 * time.Millisecond)
 }
 
 func TestHandlePage_GetLayoutMetrics_Fallback(t *testing.T) {
@@ -689,12 +703,26 @@ func TestHandlePage_SetExtraHTTPHeaders(t *testing.T) {
 
 func TestHandlePage_RemoveScriptToEvaluateOnNewDocument(t *testing.T) {
 	b, mb := newTestBridge()
-	mb.SetResponse("", "Page.removeScriptToEvaluateOnNewDocument", json.RawMessage(`{}`), nil)
+	mb.SetResponse("", "Page.setInitScripts", json.RawMessage(`{}`), nil)
+	first, cdpErr := b.handlePage(nil, &cdp.Message{Method: "Page.addScriptToEvaluateOnNewDocument", Params: json.RawMessage(`{"source":"globalThis.first = true"}`)})
+	if cdpErr != nil {
+		t.Fatal(cdpErr)
+	}
+	var firstScript struct {
+		Identifier string `json:"identifier"`
+	}
+	if err := json.Unmarshal(first, &firstScript); err != nil {
+		t.Fatal(err)
+	}
+	_, cdpErr = b.handlePage(nil, &cdp.Message{Method: "Page.addScriptToEvaluateOnNewDocument", Params: json.RawMessage(`{"source":"globalThis.second = true"}`)})
+	if cdpErr != nil {
+		t.Fatal(cdpErr)
+	}
 
 	msg := &cdp.Message{
 		ID:     1,
 		Method: "Page.removeScriptToEvaluateOnNewDocument",
-		Params: json.RawMessage(`{"identifier":"script-99"}`),
+		Params: mustMarshal(map[string]string{"identifier": firstScript.Identifier}),
 	}
 
 	result, cdpErr := b.handlePage(nil, msg)
@@ -705,14 +733,18 @@ func TestHandlePage_RemoveScriptToEvaluateOnNewDocument(t *testing.T) {
 		t.Errorf("result = %s, want {}", string(result))
 	}
 
-	calls := mb.CallsForMethod("Page.removeScriptToEvaluateOnNewDocument")
-	if len(calls) == 0 {
-		t.Fatal("expected Page.removeScriptToEvaluateOnNewDocument call")
+	calls := mb.CallsForMethod("Page.setInitScripts")
+	if len(calls) != 3 {
+		t.Fatalf("setInitScripts calls = %d, want 3", len(calls))
 	}
-	var params map[string]interface{}
-	json.Unmarshal(calls[0].Params, &params)
-	if params["scriptId"] != "script-99" {
-		t.Errorf("scriptId = %v, want script-99", params["scriptId"])
+	var params struct {
+		Scripts []pageInitScript `json:"scripts"`
+	}
+	if err := json.Unmarshal(calls[2].Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if len(params.Scripts) != 1 || params.Scripts[0].Script != "globalThis.second = true" {
+		t.Fatalf("remaining scripts = %+v", params.Scripts)
 	}
 }
 
@@ -955,8 +987,12 @@ func TestHandlePage_SetInterceptFileChooserDialog_Error(t *testing.T) {
 
 func TestHandlePage_DescribeNode_DelegatesToDOM(t *testing.T) {
 	b, mb := newTestBridge()
+	b.latestCtx[""] = "context"
+	mb.SetResponse("", "Runtime.evaluate", json.RawMessage(`{"result":{"type":"object","objectId":"registry"}}`), nil)
 	mb.SetResponse("", "Page.describeNode", json.RawMessage(`{"contentFrameId":"frame-123"}`), nil)
-	mb.SetResponse("", "Runtime.callFunction", json.RawMessage(`{"result":{"value":"{\"nodeType\":1,\"nodeName\":\"IFRAME\",\"localName\":\"iframe\",\"nodeValue\":\"\",\"childCount\":0,\"attrs\":[\"src\",\"https://example.com\"]}"}}`), nil)
+	mb.QueueResponse("", "Runtime.callFunction", json.RawMessage(`{"result":{"type":"number","value":1}}`), nil)
+	mb.QueueResponse("", "Runtime.callFunction", json.RawMessage(`{"result":{"value":{"localId":1,"nodeType":1,"nodeName":"IFRAME","localName":"iframe","attributes":["src","https://example.com"]}}}`), nil)
+	mb.QueueResponse("", "Runtime.callFunction", json.RawMessage(`{"result":{"type":"object","subtype":"node","objectId":"iframe-node"}}`), nil)
 
 	msg := &cdp.Message{
 		ID:     1,

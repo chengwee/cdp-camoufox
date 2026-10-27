@@ -448,19 +448,16 @@ func TestNetworkEmulateNetworkConditions(t *testing.T) {
 	}
 }
 
-func TestNetworkGetResponseBody(t *testing.T) {
+func TestHandleNetwork_GetResponseBody(t *testing.T) {
 	b, mb := newTestBridge()
 
-	resp, _ := json.Marshal(map[string]interface{}{
-		"body":          "SGVsbG8=",
-		"base64Encoded": true,
-	})
-	mb.SetResponse("", "Browser.getResponseBody", resp, nil)
+	mb.SetResponse("page-session", "Network.getResponseBody", json.RawMessage(`{"base64body":"SGVsbG8="}`), nil)
 
 	msg := &cdp.Message{
-		ID:     1,
-		Method: "Network.getResponseBody",
-		Params: json.RawMessage(`{"requestId":"req-net-1"}`),
+		ID:        1,
+		Method:    "Network.getResponseBody",
+		SessionID: "page-session",
+		Params:    json.RawMessage(`{"requestId":"req-net-1"}`),
 	}
 
 	result, cdpErr := b.handleNetwork(nil, msg)
@@ -469,13 +466,27 @@ func TestNetworkGetResponseBody(t *testing.T) {
 	}
 
 	last, _ := mb.LastCall()
-	if last.Method != "Browser.getResponseBody" {
-		t.Errorf("method = %q, want Browser.getResponseBody", last.Method)
+	if last.Method != "Network.getResponseBody" || last.SessionID != "page-session" || string(last.Params) != `{"requestId":"req-net-1"}` {
+		t.Errorf("backend call = %+v", last)
 	}
 
-	// Result is passed through directly
-	if result == nil {
-		t.Fatal("expected non-nil result")
+	if string(result) != `{"body":"SGVsbG8=","base64Encoded":true}` {
+		t.Errorf("result = %s", result)
+	}
+}
+
+func TestHandleNetwork_GetResponseBody_Evicted(t *testing.T) {
+	b, mb := newTestBridge()
+	b.networkRequests["page-session\x00req-net-1"] = networkRequestInfo{SessionID: "page-session", MimeType: "application/json"}
+	b.ownership.setRequestOwner("req-net-1", "page-session")
+	mb.SetResponse("page-session", "Network.getResponseBody", json.RawMessage(`{"base64body":"","evicted":true}`), nil)
+	msg := &cdp.Message{Method: "Network.getResponseBody", SessionID: "page-session", Params: json.RawMessage(`{"requestId":"req-net-1"}`)}
+	_, cdpErr := b.handleNetwork(nil, msg)
+	if cdpErr == nil {
+		t.Fatal("expected error for evicted response body")
+	}
+	if len(b.networkRequests) != 0 || b.ownership.requestOwned("page-session", "req-net-1") {
+		t.Fatal("evicted response metadata or ownership retained")
 	}
 }
 
