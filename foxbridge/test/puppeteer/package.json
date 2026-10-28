@@ -1,0 +1,11 @@
+{
+  "name": "foxbridge-puppeteer-tests",
+  "private": true,
+  "scripts": {
+    "test": "node test-all.js",
+    "test:local": "node test-local.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^24.0.0"
+  }
+}
