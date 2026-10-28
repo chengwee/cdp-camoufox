@@ -3,9 +3,11 @@ package bridge
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/VulpineOS/foxbridge/pkg/cdp"
 )
@@ -27,27 +29,9 @@ func (b *Bridge) handleAccessibility(conn *cdp.Connection, msg *cdp.Message) (js
 				return nil, &cdp.Error{Code: -32000, Message: "frame-scoped accessibility is not supported by this Camoufox Juggler protocol"}
 			}
 		}
-		var document *domDocument
-		var version int
-		var err error
-		if !b.isBiDi && b.latestContextForSession(msg.SessionID) != "" {
-			document, err = b.domDocumentFor(msg.SessionID, "")
-			if err == nil {
-				version, err = b.domVersion(document)
-			}
-			if err != nil {
-				return nil, &cdp.Error{Code: -32000, Message: err.Error()}
-			}
-		}
-		result, err := b.callJuggler(msg.SessionID, "Accessibility.getFullAXTree", nil)
+		result, err := b.captureAccessibility(msg.SessionID)
 		if err != nil {
 			return nil, &cdp.Error{Code: -32000, Message: err.Error()}
-		}
-		if document != nil {
-			result, err = b.associateAccessibilityNodes(msg.SessionID, document, version, result)
-			if err != nil {
-				return nil, &cdp.Error{Code: -32000, Message: err.Error()}
-			}
 		}
 		adapted, err := adaptAccessibilityTreeResult(result)
 		if err != nil {
@@ -57,6 +41,32 @@ func (b *Bridge) handleAccessibility(conn *cdp.Connection, msg *cdp.Message) (js
 
 	default:
 		return nil, &cdp.Error{Code: -32601, Message: fmt.Sprintf("method not found: %s", msg.Method)}
+	}
+}
+
+func (b *Bridge) captureAccessibility(sessionID string) (json.RawMessage, error) {
+	deadline := time.Now().Add(5 * time.Second)
+	for attempt := 0; ; attempt++ {
+		var document *domDocument
+		var version int
+		var err error
+		if !b.isBiDi && b.latestContextForSession(sessionID) != "" {
+			document, err = b.domDocumentFor(sessionID, "")
+			if err == nil {
+				version, err = b.domVersion(document)
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+		result, err := b.callJuggler(sessionID, "Accessibility.getFullAXTree", nil)
+		if err == nil && document != nil {
+			result, err = b.associateAccessibilityNodes(sessionID, document, version, result)
+		}
+		if !errors.Is(err, errAccessibilityChanged) || attempt >= 2 || time.Now().After(deadline) {
+			return result, err
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

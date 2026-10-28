@@ -5,6 +5,7 @@ import { Stagehand } from "@browserbasehq/stagehand";
 
 const cdpUrl = process.env.FOXBRIDGE_CDP_URL;
 const markup = `<!doctype html><title>Stagehand compatibility</title>
+<script>window.fixturePageHelpers = {locale:'th', setLanguage(language) { this.locale=language; return this.locale; }};</script>
 <label for="name">Passenger name</label><input id="name">
 <label for="class">Ticket class</label><select id="class"><option value="standard">Standard</option><option value="first">First class</option></select>
 <button id="decoy" onclick="document.querySelector('#result').textContent='Wrong button'">Cancel booking</button>
@@ -33,6 +34,16 @@ before(async () => {
     } else if (request.url === "/frames") {
       response.end(
         `<!doctype html><title>Frame test</title><p>Parent document</p><iframe id="same" src="/frame"></iframe><iframe id="cross" src="http://127.0.0.1:${crossOriginServer.address().port}/frame"></iframe>`,
+      );
+    } else if (request.url?.startsWith("/load-fixture")) {
+      response.end(
+        '<!doctype html><title>Loading fixture</title><iframe src="/frame"></iframe><img src="/slow-image">',
+      );
+    } else if (request.url === "/slow-image") {
+      response.setHeader("Content-Type", "image/svg+xml");
+      setTimeout(
+        () => response.end('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>'),
+        700,
       );
     } else {
       response.end(markup);
@@ -80,6 +91,36 @@ async function assertEventually(read, expected) {
 }
 
 test(
+  "page-world compatibility exposes page helpers and their remote handles",
+  { skip: !cdpUrl || process.env.FOXBRIDGE_PAGE_WORLD_EVAL !== "1", timeout: 20000 },
+  async () => {
+    await openFixture();
+    assert.equal(await page.evaluate(() => window.fixturePageHelpers.setLanguage("en")), "en");
+    const { result } = await page.sendCDP("Runtime.evaluate", {
+      expression: "window.fixturePageHelpers",
+      returnByValue: false,
+    });
+    assert.ok(result.objectId);
+    const called = await page.sendCDP("Runtime.callFunctionOn", {
+      objectId: result.objectId,
+      functionDeclaration: "function() { return this.setLanguage('th'); }",
+      returnByValue: true,
+    });
+    assert.equal(called.result.value, "th");
+    await page.sendCDP("Runtime.releaseObject", { objectId: result.objectId });
+  },
+);
+
+test(
+  "a loaded child frame does not finish navigation before the parent loads",
+  { skip: !cdpUrl, timeout: 20000 },
+  async () => {
+    await page.goto(`${fixtureUrl}load-fixture`, { waitUntil: "load" });
+    assert.equal(await page.evaluate(() => document.readyState), "complete");
+  },
+);
+
+test(
   "snapshots map the observed booking control to its real XPath",
   { skip: !cdpUrl, timeout: 20000 },
   async () => {
@@ -96,6 +137,33 @@ test(
       selector,
     );
     assert.equal(resolvedId, "submit");
+  },
+);
+
+test(
+  "snapshot mapping skips display-none subtrees but keeps referenced names and display-contents controls",
+  { skip: !cdpUrl, timeout: 20000 },
+  async () => {
+    await openFixture();
+    await page.evaluate(() => {
+      document.body.innerHTML =
+        '<div style="display:none"><span id="hidden-label">Visible choice</span><button>Hidden choice</button></div><div style="display:contents"><button id="visible-choice" aria-labelledby="hidden-label">Choose</button></div>';
+    });
+    const snapshot = await page.snapshot();
+    assert.ok(!snapshot.formattedTree.includes("Hidden choice"), snapshot.formattedTree);
+    const control = snapshot.formattedTree.match(/\[([^\]]+)\] button: Visible choice/);
+    assert.ok(control, snapshot.formattedTree);
+    const selector = snapshot.xpathMap[`0-${control[1]}`] ?? snapshot.xpathMap[control[1]];
+    assert.ok(selector, JSON.stringify(snapshot));
+    assert.equal(
+      await page.evaluate(
+        (xpath) =>
+          document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null)
+            .singleNodeValue?.id,
+        selector,
+      ),
+      "visible-choice",
+    );
   },
 );
 

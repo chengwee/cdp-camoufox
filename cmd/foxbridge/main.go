@@ -37,9 +37,13 @@ func main() {
 	backendMode := flag.String("backend", "juggler", "Backend protocol: juggler or bidi")
 	bidiURL := flag.String("bidi-url", "", "BiDi WebSocket URL (for --backend bidi without launching Firefox)")
 	bidiPort := flag.Int("bidi-port", 9223, "Port for BiDi WebSocket when auto-launching Firefox")
+	pageWorldEval := flag.Bool("page-world-eval", false, "Evaluate in the unnamed page world (Camoufox Juggler only)")
 	deterministicTime := flag.Int64("deterministic-time", 0, "Base epoch in milliseconds for deterministic Date.now/performance.now injection")
 	deterministicSeed := flag.Uint("deterministic-seed", 0, "Seed for deterministic Math.random/crypto.getRandomValues injection")
 	flag.Parse()
+	if *pageWorldEval && *backendMode != "juggler" {
+		log.Fatal("--page-world-eval requires a launched Camoufox with the Juggler backend")
+	}
 
 	var be backendpkg.Backend
 	var proc *firefox.Process
@@ -49,10 +53,11 @@ func main() {
 		// Launch Firefox with Juggler pipe transport
 		proc = firefox.New()
 		err := proc.Start(firefox.Config{
-			BinaryPath: *binary,
-			Headless:   *headless,
-			ProfileDir: *profile,
-			ExtraArgs:  flag.Args(),
+			BinaryPath:    *binary,
+			Headless:      *headless,
+			ProfileDir:    *profile,
+			ExtraArgs:     flag.Args(),
+			PageWorldEval: *pageWorldEval,
 		})
 		if err != nil {
 			log.Fatalf("failed to start firefox: %v", err)

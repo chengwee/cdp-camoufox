@@ -1,11 +1,14 @@
 package firefox
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +28,8 @@ type Config struct {
 	ProfileDir string
 	// BiDiPort enables WebDriver BiDi on this port. 0 = disabled.
 	BiDiPort int
+	// PageWorldEval disables isolation for the unnamed default world.
+	PageWorldEval bool
 }
 
 // Process manages a Firefox/Camoufox browser process.
@@ -50,6 +55,9 @@ func (p *Process) Start(cfg Config) error {
 
 	if p.cmd != nil {
 		return fmt.Errorf("process already running")
+	}
+	if cfg.PageWorldEval && cfg.BiDiPort > 0 {
+		return fmt.Errorf("page-world evaluation requires the Juggler backend, not BiDi")
 	}
 
 	bin := cfg.BinaryPath
@@ -83,6 +91,13 @@ func (p *Process) Start(cfg Config) error {
 	args = append(args, cfg.ExtraArgs...)
 
 	cmd := exec.Command(bin, args...)
+	if cfg.PageWorldEval {
+		var err error
+		cmd.Env, err = pageWorldEnvironment(os.Environ())
+		if err != nil {
+			return err
+		}
+	}
 	// Keep browser diagnostics visible to the process supervisor/container logs.
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -132,6 +147,68 @@ func (p *Process) Start(cfg Config) error {
 	p.startedAt = time.Now()
 
 	return nil
+}
+
+func pageWorldEnvironment(environment []string) ([]string, error) {
+	values := make(map[string]string)
+	for _, entry := range environment {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	var configText strings.Builder
+	for index := 1; ; index++ {
+		chunk, ok := values["CAMOU_CONFIG_"+strconv.Itoa(index)]
+		if !ok {
+			break
+		}
+		configText.WriteString(chunk)
+	}
+	configJSON := configText.String()
+	if configJSON == "" {
+		configJSON = values["CAMOU_CONFIG"]
+	}
+	config := make(map[string]json.RawMessage)
+	if configJSON != "" {
+		if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+			return nil, fmt.Errorf("invalid CAMOU_CONFIG JSON: %w", err)
+		}
+		if config == nil {
+			return nil, fmt.Errorf("invalid CAMOU_CONFIG JSON: expected an object")
+		}
+	}
+	config["disableWorldIsolation"] = json.RawMessage("true")
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		return nil, fmt.Errorf("encode CAMOU_CONFIG: %w", err)
+	}
+	filtered := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		if key == "CAMOU_CONFIG" {
+			continue
+		}
+		if suffix, ok := strings.CutPrefix(key, "CAMOU_CONFIG_"); ok {
+			if _, err := strconv.Atoi(suffix); err == nil {
+				continue
+			}
+		}
+		filtered = append(filtered, entry)
+	}
+	chunkSize := 32767
+	if runtime.GOOS == "windows" {
+		chunkSize = 2047
+	}
+	for index := 1; len(encoded) > 0; index++ {
+		end := min(chunkSize, len(encoded))
+		for end < len(encoded) && encoded[end]&0xc0 == 0x80 {
+			end--
+		}
+		filtered = append(filtered, fmt.Sprintf("CAMOU_CONFIG_%d=%s", index, encoded[:end]))
+		encoded = encoded[end:]
+	}
+	return filtered, nil
 }
 
 // Client returns the Juggler backend.

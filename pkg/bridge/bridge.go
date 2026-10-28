@@ -36,9 +36,9 @@ type Bridge struct {
 	completedRequestSequence uint64
 	startedAt                time.Time
 	ctxCounter               int // monotonic counter for execution context IDs
-	// loaderMap tracks the last loaderId per CDP session for lifecycle event consistency
+	// loaderMap tracks each frame's loader within its owning CDP session.
 	loaderMapMu sync.RWMutex
-	loaderMap   map[string]string // cdpSessionID → last loaderId
+	loaderMap   map[string]map[string]string
 	// latestCtx tracks the most recent Juggler execution context per session
 	latestCtxMu sync.RWMutex
 	latestCtx   map[string]string // jugglerSessionID → latest executionContextId
@@ -114,7 +114,7 @@ func New(b backend.Backend, sessions *cdp.SessionManager, server *cdp.Server, is
 		networkRequests:      make(map[string]networkRequestInfo),
 		startedAt:            time.Now(),
 		ctxCounter:           100,
-		loaderMap:            make(map[string]string),
+		loaderMap:            make(map[string]map[string]string),
 		latestCtx:            make(map[string]string),
 		subFrames:            make(map[string]map[string]bool),
 		isolatedWorlds:       make(map[string][]isolatedWorldInfo),

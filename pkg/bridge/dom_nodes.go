@@ -43,7 +43,8 @@ const domRegistryExpression = `(() => {
 		if (!value || (value.nodeType !== 9 && !value.isConnected)) throw new Error('Node is detached');
 		return value;
 	};
-	const describe = (value, depth) => {
+	const describe = (value, depth, accessibleOnly = false) => {
+		if (accessibleOnly && value.nodeType === 1 && getComputedStyle(value).display === 'none') return null;
 		const result = {
 			localId: id(value), nodeType: value.nodeType, nodeName: value.nodeName,
 			localName: value.localName || '', nodeValue: value.nodeValue || '',
@@ -55,8 +56,8 @@ const domRegistryExpression = `(() => {
 			result.baseURL = value.baseURI;
 		}
 		if (depth !== 0) {
-			result.children = Array.from(value.childNodes, child => describe(child, depth - 1));
-			if (value.shadowRoot) result.shadowRoots = [describe(value.shadowRoot, depth - 1)];
+			result.children = Array.from(value.childNodes, child => describe(child, depth - 1, accessibleOnly)).filter(Boolean);
+			if (value.shadowRoot) result.shadowRoots = [describe(value.shadowRoot, depth - 1, accessibleOnly)];
 		}
 		if (value.nodeType === 11 && value.host) result.shadowRootType = 'open';
 		return result;
@@ -181,10 +182,11 @@ func (b *Bridge) registerDOMTree(document *domDocument, node map[string]interfac
 	}
 }
 
-func (b *Bridge) describeDOM(document *domDocument, localID, depth int) (map[string]interface{}, error) {
-	object, err := b.callRegistry(document, `function(registry, localId, depth) {
-		return registry.describe(localId ? registry.node(localId) : registry.document, depth);
-	}`, []map[string]interface{}{{"value": localID}, {"value": depth}}, true)
+func (b *Bridge) describeDOM(document *domDocument, localID, depth int, accessibleOnly ...bool) (map[string]interface{}, error) {
+	filterHidden := len(accessibleOnly) > 0 && accessibleOnly[0]
+	object, err := b.callRegistry(document, `function(registry, localId, depth, accessibleOnly) {
+		return registry.describe(localId ? registry.node(localId) : registry.document, depth, accessibleOnly);
+	}`, []map[string]interface{}{{"value": localID}, {"value": depth}, {"value": filterHidden}}, true)
 	if err != nil {
 		return nil, err
 	}

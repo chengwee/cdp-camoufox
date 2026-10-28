@@ -280,7 +280,10 @@ func (b *Bridge) SetupEventSubscriptions() {
 
 		// Store loaderId so Page.eventFired can use the same one
 		b.loaderMapMu.Lock()
-		b.loaderMap[cdpSessionID] = loaderId
+		if b.loaderMap[cdpSessionID] == nil {
+			b.loaderMap[cdpSessionID] = make(map[string]string)
+		}
+		b.loaderMap[cdpSessionID][ev.FrameID] = loaderId
 		b.loaderMapMu.Unlock()
 
 		// Emit lifecycle events in Chrome's order
@@ -335,17 +338,19 @@ func (b *Bridge) SetupEventSubscriptions() {
 
 		// Use the same loaderId as the navigation that triggered this event
 		b.loaderMapMu.RLock()
-		loaderId := b.loaderMap[cdpSessionID]
+		loaderId := b.loaderMap[cdpSessionID][ev.FrameID]
 		b.loaderMapMu.RUnlock()
 		if loaderId == "" {
 			loaderId = "loader-unknown"
 		}
+		info, knownSession := b.sessions.Get(cdpSessionID)
+		isMainFrame := knownSession && ev.FrameID != "" && info.FrameID == ev.FrameID
 
 		switch ev.Name {
 		case "load":
-			b.emitEvent("Page.loadEventFired", map[string]interface{}{
-				"timestamp": 0,
-			}, cdpSessionID)
+			if isMainFrame {
+				b.emitEvent("Page.loadEventFired", map[string]interface{}{"timestamp": 0}, cdpSessionID)
+			}
 			b.emitEvent("Page.lifecycleEvent", map[string]interface{}{
 				"frameId":   cdpFrameID,
 				"loaderId":  loaderId,
@@ -359,9 +364,9 @@ func (b *Bridge) SetupEventSubscriptions() {
 			// NOTE: Isolated worlds are NOT re-emitted here.
 			// Puppeteer calls Page.createIsolatedWorld after navigation when needed.
 		case "DOMContentLoaded":
-			b.emitEvent("Page.domContentEventFired", map[string]interface{}{
-				"timestamp": 0,
-			}, cdpSessionID)
+			if isMainFrame {
+				b.emitEvent("Page.domContentEventFired", map[string]interface{}{"timestamp": 0}, cdpSessionID)
+			}
 			b.emitEvent("Page.lifecycleEvent", map[string]interface{}{
 				"frameId":   cdpFrameID,
 				"loaderId":  loaderId,
@@ -647,6 +652,10 @@ func (b *Bridge) SetupEventSubscriptions() {
 
 		cdpSessionID := b.resolveCDPSession(jugglerSessionID)
 		cdpFrameID := b.cdpFrameIDForJugglerSession(jugglerSessionID, ev.FrameID)
+
+		b.loaderMapMu.Lock()
+		delete(b.loaderMap[cdpSessionID], ev.FrameID)
+		b.loaderMapMu.Unlock()
 
 		b.emitEvent("Page.frameDetached", map[string]interface{}{
 			"frameId": cdpFrameID,

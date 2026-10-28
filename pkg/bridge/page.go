@@ -124,15 +124,16 @@ func (b *Bridge) handlePage(conn *cdp.Connection, msg *cdp.Message) (json.RawMes
 			return nil, &cdp.Error{Code: -32000, Message: err.Error()}
 		}
 
-		// Juggler doesn't emit navigation lifecycle events for reload.
-		// Puppeteer expects them, so we emit them ourselves.
-		if frameID != "" {
+		if b.isBiDi && frameID != "" {
 			cdpFrameID := b.cdpFrameIDForSession(msg.SessionID, frameID)
 			loaderId := fmt.Sprintf("reload-%d", b.nextCtxID())
 
 			// Store for eventFired consistency
 			b.loaderMapMu.Lock()
-			b.loaderMap[msg.SessionID] = loaderId
+			if b.loaderMap[msg.SessionID] == nil {
+				b.loaderMap[msg.SessionID] = make(map[string]string)
+			}
+			b.loaderMap[msg.SessionID][frameID] = loaderId
 			b.loaderMapMu.Unlock()
 
 			go func() {

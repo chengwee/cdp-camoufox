@@ -8,7 +8,7 @@ Start Foxbridge with a compatible Camoufox binary:
 
 ```sh
 go build -o .tmp/foxbridge ./cmd/foxbridge
-.tmp/foxbridge --binary /path/to/Camoufox.app/Contents/MacOS/camoufox --headless --port 19322
+.tmp/foxbridge --binary /path/to/Camoufox.app/Contents/MacOS/camoufox --headless --port 19322 --page-world-eval
 ```
 
 In another terminal:
@@ -17,10 +17,15 @@ In another terminal:
 cd test/stagehand
 bun install --frozen-lockfile
 FOXBRIDGE_CDP_URL=ws://127.0.0.1:19322/devtools/browser/foxbridge \
+FOXBRIDGE_PAGE_WORLD_EVAL=1 \
 FOXBRIDGE_EXPECT_FRAME_AX_UNSUPPORTED=1 bun run test
 ```
 
 `FOXBRIDGE_EXPECT_FRAME_AX_UNSUPPORTED=1` enables a negative test for the documented child-frame accessibility limitation. For a Chromium reference run, omit it and supply Chromium's browser WebSocket URL from `/json/version`. The suite skips browser checks if no endpoint is supplied; skipped checks are not a compatibility pass.
+
+`--page-world-eval` is an opt-in setting for Camoufox with the Juggler backend. It lets default-world evaluations access the page's own JavaScript helpers and return their object handles, as Chrome does. ATLAS needs this for Thai Rail language switching. Scripts in that world become visible to the website. Named isolated worlds remain separate. Without this flag, Foxbridge preserves Camoufox's default sandbox behavior. Inherited Camoufox configuration is preserved, except `disableWorldIsolation` is set to `true` when this option is enabled. The option is rejected with the BiDi backend.
+
+`FOXBRIDGE_PAGE_WORLD_EVAL=1` enables the page-helper and remote-handle regression check. Set it only when the endpoint provides page-world evaluation, including Chromium.
 
 ## Supported milestone
 
@@ -34,8 +39,8 @@ Completed network request metadata is retained for the most recent 1,024 request
 
 - Child-frame accessibility snapshots are not supported by this Camoufox protocol. A frame-scoped accessibility query returns an explicit error; it must not return the parent's tree. Main-frame accessibility snapshots omit iframe descendants. Frame locator actions are a separate capability and can work without frame observation.
 - These tests do not establish natural-language `act`, `observe`, structured model-based `extract`, or DOM-agent compatibility. Those still require real model-backed validation. The action-object test and the no-model page-text extraction overload do not substitute for those checks.
-- Accessibility identity mapping uses Camoufox's native `foundObject` marker. It requests a native tree for each candidate DOM node rather than guessing from labels. Large pages incur extra protocol traffic, and snapshot cost needs measurement before production use.
-- Snapshots reject concurrent DOM changes or accessibility-state changes rather than combining identities and values from different page states. Callers may need to retry after the page settles.
+- Accessibility identity mapping uses Camoufox's native `foundObject` marker. It skips CSS `display:none` subtrees and pipelines batches of up to 32 native tree requests rather than guessing identities from labels. Hidden text can still contribute to accessible names through the browser's native tree. Each remaining candidate requires its own native tree, so large pages remain more expensive than Chrome's native accessibility query.
+- Snapshots reject concurrent DOM changes or accessibility-state changes rather than combining identities and values from different page states. A changed snapshot is retried from scratch, with at most three attempts. Foxbridge stops starting retries after five seconds; individual native requests retain their backend timeout. Pages that keep changing can still return a changed-document error.
 - Full orchestrator workflows, advanced network behavior, profile persistence, screenshot masking, visual agents, and Stagehand v4 are outside this milestone's verified scope.
 
 The original Go and Puppeteer suites remain regression gates. Puppeteer accepts the same `FOXBRIDGE_CDP_URL` override.
