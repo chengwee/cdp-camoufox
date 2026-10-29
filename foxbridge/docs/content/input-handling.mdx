@@ -68,7 +68,7 @@ The `rawKeyDown` mapping is the most important — CDP uses this for physical ke
 |-----------|--------------|-------|
 | `key` | `key` | Key name (e.g., `"a"`, `"Enter"`) |
 | `code` | `code` | Physical key (e.g., `"KeyA"`, `"Enter"`) |
-| `text` | `text` | Character generated (only if non-empty) |
+| `text` | `text` | Character generated (only if non-empty and not a key-release event) |
 | `windowsVirtualKeyCode` | `keyCode` | Numeric key code |
 | `modifiers` | -- | Not forwarded (Juggler uses separate modifier keys) |
 

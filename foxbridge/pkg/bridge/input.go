@@ -118,7 +118,7 @@ func (b *Bridge) handleInput(conn *cdp.Connection, msg *cdp.Message) (json.RawMe
 			"location": 0,
 			"repeat":   false,
 		}
-		if params.Text != "" {
+		if params.Text != "" && keyType != "keyup" {
 			jugglerParams["text"] = params.Text
 		}
 		if params.Key == "" {

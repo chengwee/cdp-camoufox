@@ -150,6 +150,15 @@ func TestHandleInput_DispatchKeyEvent(t *testing.T) {
 				"key":  "Enter",
 			},
 		},
+		{
+			name:   "keyUp ignores character text",
+			params: `{"type":"keyUp","text":"T","key":"T"}`,
+			checks: map[string]interface{}{
+				"type": "keyup",
+				"key":  "T",
+				"text": nil,
+			},
+		},
 	}
 
 	for _, tt := range tests {
