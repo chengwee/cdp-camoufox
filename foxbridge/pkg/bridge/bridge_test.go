@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 )
 
 // mockConn is a minimal cdp.Connection that captures sent messages.

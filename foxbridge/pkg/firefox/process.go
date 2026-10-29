@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/VulpineOS/foxbridge/pkg/backend"
-	"github.com/VulpineOS/foxbridge/pkg/backend/juggler"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/backend"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/backend/juggler"
 )
 
 // Config holds the Firefox launch configuration.

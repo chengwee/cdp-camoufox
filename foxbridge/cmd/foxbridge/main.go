@@ -11,12 +11,12 @@ import (
 	"syscall"
 	"time"
 
-	backendpkg "github.com/VulpineOS/foxbridge/pkg/backend"
-	"github.com/VulpineOS/foxbridge/pkg/backend/bidi"
-	"github.com/VulpineOS/foxbridge/pkg/bridge"
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
-	"github.com/VulpineOS/foxbridge/pkg/firefox"
-	"github.com/VulpineOS/foxbridge/pkg/recording"
+	backendpkg "github.com/chengwee/cdp-camoufox/foxbridge/pkg/backend"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/backend/bidi"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/bridge"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/firefox"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/recording"
 )
 
 func main() {

@@ -840,6 +840,19 @@ class ExecutionContext {
     return this._createRemoteObject(debuggerObj);
   }
 
+  rawValuesToRemoteArray(rawValues) {
+    const array = this._debuggee.executeInGlobal('([])').return;
+    const properties = {};
+    for (const [index, value] of rawValues.entries()) {
+      properties[index] = {
+        configurable: true, writable: true, enumerable: true,
+        value: this._debuggee.makeDebuggeeValue(value),
+      };
+    }
+    array.defineProperties(properties);
+    return this._createRemoteObject(array);
+  }
+
   _instanceOf(debuggerObj, rawObj, className) {
     if (this._domWindow)
       return rawObj instanceof this._domWindow[className];

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 )
 
 func TestHandleDOM_EnableDisable(t *testing.T) {

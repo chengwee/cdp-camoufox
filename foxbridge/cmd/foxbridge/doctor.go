@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/VulpineOS/foxbridge/pkg/doctor"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/doctor"
 )
 
 func runDoctorCommand(args []string) int {

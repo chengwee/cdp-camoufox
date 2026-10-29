@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 	"github.com/google/uuid"
 )
 
@@ -428,8 +428,8 @@ func (b *Bridge) SetupEventSubscriptions() {
 		b.ctxMapMu.Lock()
 		b.ctxMap[ctxID] = ev.ExecutionContextID
 		b.ctxOwners[ctxID] = cdpSessionID
-		b.contextFrames[ev.ExecutionContextID] = ev.AuxData.FrameID
-		b.contextNames[ev.ExecutionContextID] = ev.AuxData.Name
+		b.contextFrames[scopedContextID(cdpSessionID, ev.ExecutionContextID)] = ev.AuxData.FrameID
+		b.contextNames[scopedContextID(cdpSessionID, ev.ExecutionContextID)] = ev.AuxData.Name
 		b.ctxMapMu.Unlock()
 
 		if ev.AuxData.Name == "" {
@@ -441,7 +441,7 @@ func (b *Bridge) SetupEventSubscriptions() {
 			}
 		}
 		b.ctxMapMu.Lock()
-		b.ctxUniqueOwners[ev.ExecutionContextID] = cdpSessionID
+		b.ctxUniqueOwners[scopedContextID(cdpSessionID, ev.ExecutionContextID)] = cdpSessionID
 		b.ctxMapMu.Unlock()
 
 		cdpFrameID := b.cdpFrameIDForJugglerSession(jugglerSessionID, ev.AuxData.FrameID)
@@ -451,7 +451,7 @@ func (b *Bridge) SetupEventSubscriptions() {
 				"id":       ctxID,
 				"origin":   "",
 				"name":     ev.AuxData.Name,
-				"uniqueId": ev.ExecutionContextID,
+				"uniqueId": scopedContextID(cdpSessionID, ev.ExecutionContextID),
 				"auxData": map[string]interface{}{
 					"isDefault": ev.AuxData.Name == "",
 					"type":      contextType(ev.AuxData.Name),
@@ -512,7 +512,7 @@ func (b *Bridge) SetupEventSubscriptions() {
 		var numericID int
 		b.ctxMapMu.RLock()
 		for k, v := range b.ctxMap {
-			if v == ev.ExecutionContextID {
+			if v == ev.ExecutionContextID && b.ctxOwners[k] == cdpSessionID {
 				numericID = k
 				break
 			}
@@ -525,17 +525,20 @@ func (b *Bridge) SetupEventSubscriptions() {
 			var destroyIDs []int
 			b.ctxMapMu.Lock()
 			for k, v := range b.ctxMap {
-				if v == ev.ExecutionContextID {
+				if v == ev.ExecutionContextID && b.ctxOwners[k] == cdpSessionID {
 					destroyIDs = append(destroyIDs, k)
 					delete(b.ctxMap, k)
 					delete(b.ctxOwners, k)
 				}
 			}
+			delete(b.contextFrames, scopedContextID(cdpSessionID, ev.ExecutionContextID))
+			delete(b.contextNames, scopedContextID(cdpSessionID, ev.ExecutionContextID))
+			delete(b.ctxUniqueOwners, scopedContextID(cdpSessionID, ev.ExecutionContextID))
 			b.ctxMapMu.Unlock()
 
 			b.emitEvent("Runtime.executionContextDestroyed", map[string]interface{}{
 				"executionContextId":       numericID,
-				"executionContextUniqueId": ev.ExecutionContextID,
+				"executionContextUniqueId": scopedContextID(cdpSessionID, ev.ExecutionContextID),
 			}, cdpSessionID)
 
 			for _, id := range destroyIDs {
@@ -550,15 +553,15 @@ func (b *Bridge) SetupEventSubscriptions() {
 			var destroyed []int
 			b.ctxMapMu.Lock()
 			for id, contextID := range b.ctxMap {
-				if contextID == ev.ExecutionContextID {
+				if contextID == ev.ExecutionContextID && b.ctxOwners[id] == cdpSessionID {
 					destroyed = append(destroyed, id)
 					delete(b.ctxMap, id)
 					delete(b.ctxOwners, id)
 				}
 			}
-			delete(b.contextFrames, ev.ExecutionContextID)
-			delete(b.contextNames, ev.ExecutionContextID)
-			delete(b.ctxUniqueOwners, ev.ExecutionContextID)
+			delete(b.contextFrames, scopedContextID(cdpSessionID, ev.ExecutionContextID))
+			delete(b.contextNames, scopedContextID(cdpSessionID, ev.ExecutionContextID))
+			delete(b.ctxUniqueOwners, scopedContextID(cdpSessionID, ev.ExecutionContextID))
 			b.ctxMapMu.Unlock()
 			b.clearDOMContext(cdpSessionID, ev.ExecutionContextID)
 			b.latestCtxMu.Lock()
@@ -568,7 +571,7 @@ func (b *Bridge) SetupEventSubscriptions() {
 			b.latestCtxMu.Unlock()
 			for _, id := range destroyed {
 				b.emitEvent("Runtime.executionContextDestroyed", map[string]interface{}{
-					"executionContextId": id, "executionContextUniqueId": ev.ExecutionContextID,
+					"executionContextId": id, "executionContextUniqueId": scopedContextID(cdpSessionID, ev.ExecutionContextID),
 				}, cdpSessionID)
 			}
 		}

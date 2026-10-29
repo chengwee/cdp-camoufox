@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 )
 
 func TestHandleStorage(t *testing.T) {

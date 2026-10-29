@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 )
 
 type pageInitScript struct {
@@ -27,7 +27,8 @@ func (b *Bridge) contextForWorld(sessionID, frameID, name string) (int, string) 
 	var numericID int
 	var contextID string
 	for id, candidate := range b.ctxMap {
-		if id > numericID && b.ctxOwners[id] == sessionID && b.contextFrames[candidate] == frameID && b.contextNames[candidate] == name {
+		key := scopedContextID(sessionID, candidate)
+		if id > numericID && b.ctxOwners[id] == sessionID && b.contextFrames[key] == frameID && b.contextNames[key] == name {
 			numericID, contextID = id, candidate
 		}
 	}

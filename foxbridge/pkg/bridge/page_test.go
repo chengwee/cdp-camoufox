@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 )
 
 func TestToJSString(t *testing.T) {
@@ -377,8 +377,8 @@ func TestHandlePage_CreateIsolatedWorld(t *testing.T) {
 	b, _ := newTestBridge()
 	b.ctxMap[201] = "utility-context"
 	b.ctxOwners[201] = "s1"
-	b.contextFrames["utility-context"] = "frame-1"
-	b.contextNames["utility-context"] = "utility"
+	b.contextFrames[scopedContextID("s1", "utility-context")] = "frame-1"
+	b.contextNames[scopedContextID("s1", "utility-context")] = "utility"
 
 	msg := &cdp.Message{
 		ID:        1,

@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/VulpineOS/foxbridge/pkg/recording"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/recording"
 )
 
 func runReplayCommand(args []string) int {

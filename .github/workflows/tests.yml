@@ -1154,6 +1154,65 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
+  foxbridge-checks:
+    uses: ./.github/workflows/cdp-foxbridge.yml
+    with:
+      ref: ${{ inputs.ref || github.ref }}
+    permissions:
+      contents: read
+
+  foxbridge-browser:
+    name: Foxbridge browser compatibility
+    if: always() && (needs.build.result == 'success' || needs.fetch-browser.result == 'success')
+    needs: [resolve, build, fetch-browser]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: ./.github/actions/prepare-browser
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: foxbridge/go.mod
+          cache-dependency-path: foxbridge/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+        working-directory: foxbridge/test/stagehand
+      - name: Run unchanged CDP client checks
+        env:
+          FOXBRIDGE_CDP_URL: ws://127.0.0.1:19322/devtools/browser/foxbridge
+          FOXBRIDGE_PAGE_WORLD_EVAL: '1'
+        run: |
+          mkdir -p .tmp
+          go -C foxbridge build -o ../.tmp/foxbridge ./cmd/foxbridge
+          .tmp/foxbridge --binary "$CAMOUFOX_BINARY" --headless --page-world-eval --port 19322 > .tmp/foxbridge.log 2>&1 &
+          bridge_pid=$!
+          trap 'kill "$bridge_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:19322/json/version > /dev/null; then
+              ready=true
+              break
+            fi
+            sleep 0.5
+          done
+          if [ "$ready" != true ]; then cat .tmp/foxbridge.log; exit 1; fi
+          cd foxbridge/test/stagehand
+          bun run test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: foxbridge-browser-log
+          path: .tmp/foxbridge.log
+          include-hidden-files: true
+
   summary:
     name: Summary
     needs: [resolve, static, pythonlib, typescript, install, build, fetch-browser, playwright,
@@ -1263,7 +1322,8 @@ jobs:
     # did not run has not passed, and silently skipping one is the cheapest way
     # to a green tick.
     needs: [resolve, static, pythonlib, typescript, install, build, fetch-browser, playwright,
-            patch-guards, build-tester, native, typescript-browser, growth, sundial, summary]
+            patch-guards, build-tester, native, typescript-browser, growth, sundial, summary,
+            foxbridge-checks, foxbridge-browser]
     if: always()
     runs-on: ubuntu-24.04
     permissions:

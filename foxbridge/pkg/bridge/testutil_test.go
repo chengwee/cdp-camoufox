@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/VulpineOS/foxbridge/pkg/backend"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/backend"
 )
 
 // mockCall records a single backend.Call invocation.

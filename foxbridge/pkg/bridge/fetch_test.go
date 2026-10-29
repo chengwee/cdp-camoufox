@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 )
 
 func TestFetchEnable(t *testing.T) {

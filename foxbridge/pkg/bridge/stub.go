@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 )
 
 // stubDomains are domains that return success no-ops.

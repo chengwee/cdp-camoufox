@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/VulpineOS/foxbridge/pkg/backend"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/backend"
 )
 
 // Compile-time check that Client implements backend.Backend.

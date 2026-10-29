@@ -3,7 +3,7 @@ package bridge
 import (
 	"encoding/json"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 )
 
 // handleIO handles IO domain methods (used for PDF streaming).

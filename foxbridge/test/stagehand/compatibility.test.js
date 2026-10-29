@@ -4,6 +4,7 @@ import { after, before, test } from "node:test";
 import { Stagehand } from "@browserbasehq/stagehand";
 
 const cdpUrl = process.env.FOXBRIDGE_CDP_URL;
+if (!cdpUrl) throw new Error("FOXBRIDGE_CDP_URL must point to the matching CDP Camoufox build");
 const markup = `<!doctype html><title>Stagehand compatibility</title>
 <script>window.fixturePageHelpers = {locale:'th', setLanguage(language) { this.locale=language; return this.locale; }};</script>
 <label for="name">Passenger name</label><input id="name">
@@ -34,6 +35,10 @@ before(async () => {
     } else if (request.url === "/frames") {
       response.end(
         `<!doctype html><title>Frame test</title><p>Parent document</p><iframe id="same" src="/frame"></iframe><iframe id="cross" src="http://127.0.0.1:${crossOriginServer.address().port}/frame"></iframe>`,
+      );
+    } else if (request.url === "/hidden-frames") {
+      response.end(
+        '<!doctype html><title>Hidden frame test</title><p>Visible parent</p><iframe id="hidden" style="display:none" src="/frame"></iframe>',
       );
     } else if (request.url?.startsWith("/load-fixture")) {
       response.end(
@@ -401,15 +406,60 @@ test(
 );
 
 test(
-  "child-frame accessibility is rejected rather than returning the parent tree",
-  { skip: !cdpUrl || !process.env.FOXBRIDGE_EXPECT_FRAME_AX_UNSUPPORTED, timeout: 20000 },
+  "same-origin and cross-origin frame snapshots resolve their own controls",
+  { timeout: 20000 },
   async () => {
     await page.goto(`${fixtureUrl}frames`, { waitUntil: "load" });
-    const childFrame = await page.frameLocator("#cross").resolveFrame();
-    await assert.rejects(
-      page.sendCDP("Accessibility.getFullAXTree", { frameId: childFrame.frameId }),
-      /frame-scoped accessibility is not supported/,
-    );
+    for (const frameId of ["same", "cross"]) {
+      const childFrame = await page.frameLocator(`#${frameId}`).resolveFrame();
+      const tree = await page.sendCDP("Accessibility.getFullAXTree", {
+        frameId: childFrame.frameId,
+      });
+      assert.ok(!tree.nodes.some((node) => node.name?.value === "Parent document"));
+      const control = tree.nodes.find(
+        (node) => node.role?.value === "button" && node.name?.value === "Confirm in frame",
+      );
+      assert.ok(control?.backendDOMNodeId, JSON.stringify(tree));
+      const { object } = await page.sendCDP("DOM.resolveNode", {
+        backendNodeId: control.backendDOMNodeId,
+      });
+      const { result } = await page.sendCDP("Runtime.callFunctionOn", {
+        objectId: object.objectId,
+        functionDeclaration: "function() { return this.ownerDocument.title; }",
+        returnByValue: true,
+      });
+      assert.equal(result.value, "Frame");
+      await page.sendCDP("Runtime.releaseObject", { objectId: object.objectId });
+    }
+  },
+);
+
+test("hidden frames return an empty accessibility result", { timeout: 20000 }, async () => {
+  await page.goto(`${fixtureUrl}hidden-frames`, { waitUntil: "load" });
+  const frame = await page.frameLocator("#hidden").resolveFrame();
+  const tree = await page.sendCDP("Accessibility.getFullAXTree", { frameId: frame.frameId });
+  assert.deepEqual(tree.nodes, []);
+  const snapshot = await page.snapshot();
+  assert.ok(snapshot.formattedTree.includes("Visible parent"), snapshot.formattedTree);
+});
+
+test(
+  "native snapshots keep element IDs and invalidate replaced controls",
+  { timeout: 20000 },
+  async () => {
+    await openFixture();
+    const read = async () =>
+      (await page.sendCDP("Accessibility.getFullAXTree", {})).nodes.find(
+        (node) => node.name?.value === "Confirm booking" && node.role?.value === "button",
+      ).backendDOMNodeId;
+    const original = await read();
+    assert.equal(await read(), original);
+    await page.evaluate(() => {
+      const button = document.querySelector("#submit");
+      button.replaceWith(button.cloneNode(true));
+    });
+    assert.notEqual(await read(), original);
+    await assert.rejects(page.sendCDP("DOM.resolveNode", { backendNodeId: original }));
   },
 );
 

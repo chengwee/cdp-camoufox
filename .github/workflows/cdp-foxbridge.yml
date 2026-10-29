@@ -1,0 +1,55 @@
+name: Foxbridge checks
+
+on:
+  push:
+    branches: [cdp]
+    paths: ['foxbridge/**', '.github/workflows/cdp-foxbridge.yml']
+  pull_request:
+    paths: ['foxbridge/**', '.github/workflows/cdp-foxbridge.yml']
+  workflow_call:
+    inputs:
+      ref:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: foxbridge
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: foxbridge/go.mod
+          cache-dependency-path: foxbridge/go.sum
+      - run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+          test -z "$(gofmt -l cmd pkg)"
+          go vet ./...
+          go test -race -count=1 ./...
+          GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/foxbridge
+          GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/foxbridge
+  docs:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: foxbridge/docs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: foxbridge/docs/package-lock.json
+      - run: npm ci
+      - run: npm run build

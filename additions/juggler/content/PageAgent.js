@@ -59,6 +59,8 @@ export class PageAgent {
     this._runtime = frameTree.runtime();
 
     this._workerData = new Map();
+    this._backendNodeIds = new WeakMap();
+    this._nextBackendNodeId = 0;
 
     const docShell = frameTree.mainFrame().docShell();
     this._docShell = docShell;
@@ -644,21 +646,31 @@ export class PageAgent {
     badptr.contents;
   }
 
-  async _getFullAXTree({objectId}) {
+  async _getFullAXTree({objectId, frameId, executionContextId}) {
+    const frame = frameId ? this._frameTree.frame(frameId) : this._frameTree.mainFrame();
+    if (!frame)
+      throw new Error('Failed to find frame with id = ' + frameId);
+    const context = executionContextId ? this._runtime.findExecutionContext(executionContextId) : null;
+    if (context && context.auxData().frameId !== frame.id())
+      throw new Error('Accessibility execution context belongs to another frame');
     let unsafeObject = null;
     if (objectId) {
-      unsafeObject = this._frameTree.mainFrame().unsafeObject(objectId);
+      unsafeObject = frame.unsafeObject(objectId);
       if (!unsafeObject)
         throw new Error(`No object found for id "${objectId}"`);
     }
 
     const service = Cc["@mozilla.org/accessibilityService;1"]
       .getService(Ci.nsIAccessibilityService);
-    const document = this._frameTree.mainFrame().domWindow().document;
+    const document = frame.domWindow().document;
     const docAcc = service.getAccessibleFor(document);
+    if (!docAcc && context)
+      return {tree: null, domNodes: context.rawValuesToRemoteArray([])};
+    if (!docAcc)
+      throw new Error('Selected document has no accessibility tree');
 
     while (docAcc.document.isUpdatePendingForJugglerAccessibility)
-      await new Promise(x => this._frameTree.mainFrame().domWindow().requestAnimationFrame(x));
+      await new Promise(x => frame.domWindow().requestAnimationFrame(x));
 
     async function waitForQuiet() {
       let state = {};
@@ -692,13 +704,38 @@ export class PageAgent {
       Services.obs.addObserver(eventObserver, "accessible-event");
       return promise;
     }
+    const domNodes = [];
+    // Native anonymous accessibility nodes are not page DOM nodes. Only export
+    // handles reachable through the document and its open shadow roots.
+    const reachableNodes = new WeakSet();
+    const visitDOM = node => {
+      reachableNodes.add(node);
+      for (const child of node.childNodes)
+        visitDOM(child);
+      if (node.shadowRoot)
+        visitDOM(node.shadowRoot);
+    };
+    const backendNodeIds = this._backendNodeIds;
+    const backendNodeId = node => {
+      if (!backendNodeIds.has(node))
+        backendNodeIds.set(node, ++this._nextBackendNodeId);
+      return backendNodeIds.get(node);
+    };
     function buildNode(accElement) {
+      const domNode = accElement.DOMNode;
+      if (context && domNode && domNode !== document && domNode.ownerDocument !== document)
+        return null;
       let a = {}, b = {};
       accElement.getState(a, b);
       const tree = {
         role: service.getStringRole(accElement.role),
         name: accElement.name || '',
       };
+      if (context && domNode && reachableNodes.has(domNode)) {
+        tree.backendNodeId = backendNodeId(domNode);
+        tree.nodeIndex = domNodes.length;
+        domNodes.push(domNode);
+      }
       if (unsafeObject && unsafeObject === accElement.DOMNode)
         tree.foundObject = true;
       for (const userStringProperty of [
@@ -758,16 +795,22 @@ export class PageAgent {
       const children = [];
 
       for (let child = accElement.firstChild; child; child = child.nextSibling) {
-        children.push(buildNode(child));
+        const childTree = buildNode(child);
+        if (childTree)
+          children.push(childTree);
       }
       if (children.length)
         tree.children = children;
       return tree;
     }
     await waitForQuiet();
+    if (frame.domWindow()?.document !== document)
+      throw new Error('Document changed during accessibility snapshot');
+    if (context)
+      visitDOM(document);
     return {
-      tree: buildNode(docAcc)
+      tree: buildNode(docAcc),
+      domNodes: context ? context.rawValuesToRemoteArray(domNodes) : undefined,
     };
   }
 }
-

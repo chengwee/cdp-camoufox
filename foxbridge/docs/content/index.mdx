@@ -13,7 +13,9 @@ description: "Foxbridge translates Chrome DevTools Protocol to Firefox. Run Pupp
 
 Run Puppeteer, OpenClaw, and any Chrome DevTools Protocol client against Firefox-based browsers. Foxbridge accepts CDP from the client and translates it to Firefox's native protocols — either Juggler (pipe transport) or WebDriver BiDi (WebSocket). Any tool built for Chrome can control Camoufox or standard Firefox without modification.
 
-**Repository:** [VulpineOS/foxbridge](https://github.com/VulpineOS/foxbridge)
+**Repository:** [chengwee/cdp-camoufox](https://github.com/chengwee/cdp-camoufox)
+
+This fork requires a matching custom CDP Camoufox build for accessibility snapshots. See the [build and compatibility instructions](https://github.com/chengwee/cdp-camoufox/blob/cdp/CDP.md). Official Camoufox binaries do not provide the native DOM identity extension.
 
 ## Why Foxbridge?
 

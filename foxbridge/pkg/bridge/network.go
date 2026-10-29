@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"unicode/utf8"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 )
 
 func (b *Bridge) handleNetwork(conn *cdp.Connection, msg *cdp.Message) (json.RawMessage, *cdp.Error) {

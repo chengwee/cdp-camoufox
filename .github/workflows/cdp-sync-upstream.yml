@@ -1,0 +1,71 @@
+name: Prepare Camoufox upstream update
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Upstream release tag or commit to merge into cdp
+        required: true
+        type: string
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    concurrency:
+      group: cdp-sync-upstream
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: cdp
+          fetch-depth: 0
+      - name: Prepare merge branch
+        id: merge
+        env:
+          REVISION: ${{ inputs.revision }}
+        run: |
+          git fetch --no-tags -- https://github.com/daijro/camoufox.git "$REVISION"
+          upstream_commit=$(git rev-parse FETCH_HEAD)
+          if git merge-base --is-ancestor "$upstream_commit" HEAD; then
+            echo "This revision is already integrated."
+            exit 0
+          fi
+          branch="sync/camoufox-${upstream_commit:0:12}"
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            echo "An update branch already exists: $branch"
+            echo "branch=$branch" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git switch -c "$branch"
+          git merge --no-ff "$upstream_commit" -m "Merge Camoufox upstream $upstream_commit"
+          export UPSTREAM_COMMIT="$upstream_commit"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path('foxbridge/camoufox-version.json')
+          version = json.loads(path.read_text())
+          version.update(tag=os.environ['REVISION'], commit=os.environ['UPSTREAM_COMMIT'])
+          path.write_text(json.dumps(version, indent=2) + '\n')
+          PY
+          git add foxbridge/camoufox-version.json
+          git commit -m "Record candidate Camoufox upstream revision"
+          git push origin "$branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+      - name: Open update pull request
+        if: steps.merge.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.merge.outputs.branch }}
+        run: |
+          if [ "$(gh pr list --base cdp --head "$BRANCH" --state open --json number --jq length)" = 0 ]; then
+            gh pr create --base cdp --head "$BRANCH" \
+              --title "Update Camoufox upstream" \
+              --body "Merge the selected upstream revision. Review conflicts and require the matching browser build and CDP compatibility checks before merging."
+          fi
+          gh workflow run tests.yml --ref "$BRANCH"

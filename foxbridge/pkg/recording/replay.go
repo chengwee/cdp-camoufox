@@ -10,7 +10,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 	"github.com/gorilla/websocket"
 )
 

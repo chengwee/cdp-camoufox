@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 )
 
 type domNodeParams struct {
@@ -128,7 +128,7 @@ func (b *Bridge) domOperation(sessionID, method string, params domNodeParams) (j
 				return nil, err
 			}
 			defer b.callJuggler(sessionID, "Runtime.disposeObject", map[string]interface{}{"executionContextId": reference.document.contextID, "objectId": object.ObjectID})
-			result, err := b.callJuggler(sessionID, "Page.describeNode", map[string]interface{}{"frameId": b.frameIDForContext(reference.document.contextID), "objectId": object.ObjectID})
+			result, err := b.callJuggler(sessionID, "Page.describeNode", map[string]interface{}{"frameId": b.frameIDForContext(sessionID, reference.document.contextID), "objectId": object.ObjectID})
 			if err != nil {
 				return nil, err
 			}
@@ -160,7 +160,7 @@ func (b *Bridge) domOperation(sessionID, method string, params domNodeParams) (j
 			if contextID != reference.document.contextID {
 				original := object.ObjectID
 				defer b.callJuggler(sessionID, "Runtime.disposeObject", map[string]interface{}{"executionContextId": reference.document.contextID, "objectId": original})
-				adopted, err := b.callJuggler(sessionID, "Page.adoptNode", map[string]interface{}{"frameId": b.frameIDForContext(reference.document.contextID), "objectId": original, "executionContextId": contextID})
+				adopted, err := b.callJuggler(sessionID, "Page.adoptNode", map[string]interface{}{"frameId": b.frameIDForContext(sessionID, reference.document.contextID), "objectId": original, "executionContextId": contextID})
 				if err != nil {
 					return nil, err
 				}
@@ -213,7 +213,7 @@ func (b *Bridge) domOperation(sessionID, method string, params domNodeParams) (j
 	var declaration string
 	switch method {
 	case "DOM.getBoxModel", "DOM.getContentQuads":
-		result, err := b.callJuggler(sessionID, "Page.getContentQuads", map[string]interface{}{"frameId": b.frameIDForContext(reference.document.contextID), "objectId": object.ObjectID})
+		result, err := b.callJuggler(sessionID, "Page.getContentQuads", map[string]interface{}{"frameId": b.frameIDForContext(sessionID, reference.document.contextID), "objectId": object.ObjectID})
 		if err != nil {
 			return nil, err
 		}
@@ -275,7 +275,7 @@ func (b *Bridge) domOperation(sessionID, method string, params domNodeParams) (j
 		if err != nil {
 			return nil, err
 		}
-		return b.callJuggler(sessionID, "Page.scrollIntoViewIfNeeded", map[string]interface{}{"frameId": b.frameIDForContext(reference.document.contextID), "objectId": object.ObjectID})
+		return b.callJuggler(sessionID, "Page.scrollIntoViewIfNeeded", map[string]interface{}{"frameId": b.frameIDForContext(sessionID, reference.document.contextID), "objectId": object.ObjectID})
 	case "DOM.focus":
 		declaration = `function() { this.focus(); }`
 	case "DOM.getAttributes":
@@ -338,7 +338,7 @@ func (b *Bridge) frameOwner(sessionID, frameID string) (json.RawMessage, error) 
 		var frame struct {
 			ContentFrameID string `json:"contentFrameId"`
 		}
-		description, err := b.callJuggler(sessionID, "Page.describeNode", map[string]interface{}{"objectId": object.ObjectID, "frameId": b.frameIDForContext(document.contextID)})
+		description, err := b.callJuggler(sessionID, "Page.describeNode", map[string]interface{}{"objectId": object.ObjectID, "frameId": b.frameIDForContext(sessionID, document.contextID)})
 		if err != nil {
 			return nil, err
 		}

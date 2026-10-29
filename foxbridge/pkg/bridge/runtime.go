@@ -6,7 +6,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 )
 
 func mustMarshal(v interface{}) json.RawMessage {
@@ -25,6 +25,7 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 			if info, ok := b.sessions.Get(msg.SessionID); ok {
 				frameID = info.FrameID
 			}
+			nativeFrameID := frameID
 			frameID = b.cdpFrameIDForSession(msg.SessionID, frameID)
 			jugglerSessionID := b.resolveSession(msg.SessionID)
 			b.latestCtxMu.RLock()
@@ -36,6 +37,10 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 				b.ctxMapMu.Lock()
 				b.ctxMap[ctxID] = latestCtx
 				b.ctxOwners[ctxID] = msg.SessionID
+				key := scopedContextID(msg.SessionID, latestCtx)
+				b.contextFrames[key] = nativeFrameID
+				b.contextNames[key] = ""
+				b.ctxUniqueOwners[key] = msg.SessionID
 				b.ctxMapMu.Unlock()
 
 				b.emitEvent("Runtime.executionContextCreated", map[string]interface{}{
@@ -43,7 +48,7 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 						"id":       ctxID,
 						"origin":   "",
 						"name":     "",
-						"uniqueId": latestCtx,
+						"uniqueId": scopedContextID(msg.SessionID, latestCtx),
 						"auxData": map[string]interface{}{
 							"isDefault": true,
 							"type":      "default",
@@ -79,7 +84,7 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 		if params.ContextID > 0 && !b.contextOwned(msg.SessionID, params.ContextID) {
 			return nil, &cdp.Error{Code: -32000, Message: "execution context not found"}
 		}
-		execCtxID := params.UniqueContextID
+		execCtxID := strings.TrimPrefix(params.UniqueContextID, msg.SessionID+":")
 		if execCtxID == "" && params.ContextID > 0 {
 			b.ctxMapMu.RLock()
 			if mapped, ok := b.ctxMap[params.ContextID]; ok {
@@ -169,7 +174,7 @@ func (b *Bridge) handleRuntime(conn *cdp.Connection, msg *cdp.Message) (json.Raw
 		if params.ExecutionContextID > 0 && !b.contextOwned(msg.SessionID, params.ExecutionContextID) {
 			return nil, &cdp.Error{Code: -32000, Message: "execution context not found"}
 		}
-		execCtxID := params.UniqueContextID
+		execCtxID := strings.TrimPrefix(params.UniqueContextID, msg.SessionID+":")
 		if execCtxID == "" && params.ExecutionContextID > 0 {
 			b.ctxMapMu.RLock()
 			if mapped, ok := b.ctxMap[params.ExecutionContextID]; ok {

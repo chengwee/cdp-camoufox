@@ -3,7 +3,7 @@ package bridge
 import (
 	"encoding/json"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 )
 
 func (b *Bridge) handlePerformance(conn *cdp.Connection, msg *cdp.Message) (json.RawMessage, *cdp.Error) {

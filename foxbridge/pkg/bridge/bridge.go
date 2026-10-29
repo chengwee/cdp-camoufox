@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/VulpineOS/foxbridge/pkg/backend"
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/backend"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 )
 
 const syntheticDefaultBrowserContextID = "vulpine-default-context"
@@ -291,7 +291,10 @@ func (b *Bridge) clearConnectionState(records []*targetRecord) {
 
 		b.ctxMapMu.Lock()
 		for id, jugglerID := range b.ctxMap {
-			if jugglerID == record.jugglerSessionID || b.ctxOwners[id] == record.pageSessionID {
+			owner := b.ctxOwners[id]
+			if owner == record.pageSessionID || (owner == "" && jugglerID == record.jugglerSessionID) {
+				delete(b.contextFrames, scopedContextID(record.pageSessionID, jugglerID))
+				delete(b.contextNames, scopedContextID(record.pageSessionID, jugglerID))
 				delete(b.ctxMap, id)
 				delete(b.ctxOwners, id)
 			}
@@ -488,7 +491,11 @@ func (b *Bridge) uniqueContextOwned(sessionID, uniqueID string) bool {
 	b.ctxMapMu.RLock()
 	owner, known := b.ctxUniqueOwners[uniqueID]
 	b.ctxMapMu.RUnlock()
-	return !known || owner == sessionID
+	return known && owner == sessionID
+}
+
+func scopedContextID(sessionID, contextID string) string {
+	return sessionID + ":" + contextID
 }
 
 func (b *Bridge) clearContextsForSession(sessionID string) {
@@ -496,9 +503,9 @@ func (b *Bridge) clearContextsForSession(sessionID string) {
 	for id, owner := range b.ctxOwners {
 		if owner == sessionID {
 			contextID := b.ctxMap[id]
-			delete(b.contextFrames, contextID)
-			delete(b.contextNames, contextID)
-			delete(b.ctxUniqueOwners, contextID)
+			delete(b.contextFrames, scopedContextID(sessionID, contextID))
+			delete(b.contextNames, scopedContextID(sessionID, contextID))
+			delete(b.ctxUniqueOwners, scopedContextID(sessionID, contextID))
 			delete(b.ctxMap, id)
 			delete(b.ctxOwners, id)
 		}
@@ -507,10 +514,10 @@ func (b *Bridge) clearContextsForSession(sessionID string) {
 	b.clearDOMSession(sessionID)
 }
 
-func (b *Bridge) frameIDForContext(contextID string) string {
+func (b *Bridge) frameIDForContext(sessionID, contextID string) string {
 	b.ctxMapMu.RLock()
 	defer b.ctxMapMu.RUnlock()
-	return b.contextFrames[contextID]
+	return b.contextFrames[scopedContextID(sessionID, contextID)]
 }
 
 // isolatedWorldInfo tracks an isolated world for re-emission after navigation.

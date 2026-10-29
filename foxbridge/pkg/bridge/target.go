@@ -6,7 +6,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 	"github.com/google/uuid"
 )
 

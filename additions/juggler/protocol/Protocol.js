@@ -183,6 +183,8 @@ axTypes.AXTree = {
   tag: t.Optional(t.String),
 
   foundObject: t.Optional(t.Boolean),
+  backendNodeId: t.Optional(t.Number),
+  nodeIndex: t.Optional(t.Number),
 }
 
 const networkTypes = {};
@@ -1032,9 +1034,12 @@ const Accessibility = {
     'getFullAXTree': {
       params: {
         objectId: t.Optional(t.String),
+        frameId: t.Optional(t.String),
+        executionContextId: t.Optional(t.String),
       },
       returns: {
-        tree: axTypes.AXTree
+        tree: t.Nullable(axTypes.AXTree),
+        domNodes: t.Optional(runtimeTypes.RemoteObject),
       },
     }
   }

@@ -3,13 +3,11 @@ package bridge
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/VulpineOS/foxbridge/pkg/cdp"
+	"github.com/chengwee/cdp-camoufox/foxbridge/pkg/cdp"
 )
 
 func (b *Bridge) handleAccessibility(conn *cdp.Connection, msg *cdp.Message) (json.RawMessage, *cdp.Error) {
@@ -24,12 +22,7 @@ func (b *Bridge) handleAccessibility(conn *cdp.Connection, msg *cdp.Message) (js
 		if len(msg.Params) != 0 && json.Unmarshal(msg.Params, &params) != nil {
 			return nil, &cdp.Error{Code: -32602, Message: "invalid params"}
 		}
-		if !b.isBiDi && params.FrameID != "" {
-			if info, ok := b.sessions.Get(msg.SessionID); ok && b.jugglerFrameIDForSession(msg.SessionID, params.FrameID) != info.FrameID {
-				return nil, &cdp.Error{Code: -32000, Message: "frame-scoped accessibility is not supported by this Camoufox Juggler protocol"}
-			}
-		}
-		result, err := b.captureAccessibility(msg.SessionID)
+		result, err := b.captureAccessibility(msg.SessionID, params.FrameID)
 		if err != nil {
 			return nil, &cdp.Error{Code: -32000, Message: err.Error()}
 		}
@@ -44,30 +37,32 @@ func (b *Bridge) handleAccessibility(conn *cdp.Connection, msg *cdp.Message) (js
 	}
 }
 
-func (b *Bridge) captureAccessibility(sessionID string) (json.RawMessage, error) {
-	deadline := time.Now().Add(5 * time.Second)
-	for attempt := 0; ; attempt++ {
-		var document *domDocument
-		var version int
-		var err error
-		if !b.isBiDi && b.latestContextForSession(sessionID) != "" {
-			document, err = b.domDocumentFor(sessionID, "")
-			if err == nil {
-				version, err = b.domVersion(document)
-			}
-			if err != nil {
-				return nil, err
-			}
-		}
-		result, err := b.callJuggler(sessionID, "Accessibility.getFullAXTree", nil)
-		if err == nil && document != nil {
-			result, err = b.associateAccessibilityNodes(sessionID, document, version, result)
-		}
-		if !errors.Is(err, errAccessibilityChanged) || attempt >= 2 || time.Now().After(deadline) {
-			return result, err
-		}
-		time.Sleep(100 * time.Millisecond)
+func (b *Bridge) captureAccessibility(sessionID, frameID string) (json.RawMessage, error) {
+	if b.isBiDi || b.latestContextForSession(sessionID) == "" {
+		return b.callJuggler(sessionID, "Accessibility.getFullAXTree", nil)
 	}
+	contextID := ""
+	if frameID != "" {
+		frameID = b.jugglerFrameIDForSession(sessionID, frameID)
+		_, contextID = b.contextForWorld(sessionID, frameID, "")
+		if contextID == "" {
+			return nil, fmt.Errorf("frame execution context not available")
+		}
+	}
+	document, err := b.domDocumentFor(sessionID, contextID)
+	if err != nil {
+		return nil, err
+	}
+	result, err := b.callJuggler(sessionID, "Accessibility.getFullAXTree", map[string]interface{}{
+		"frameId": b.frameIDForContext(sessionID, document.contextID), "executionContextId": document.contextID,
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "not described in this scheme") {
+			return nil, fmt.Errorf("native accessibility requires a matching CDP Camoufox build: %w", err)
+		}
+		return nil, err
+	}
+	return b.associateNativeAccessibilityNodes(document, result)
 }
 
 func adaptAccessibilityTreeResult(result json.RawMessage) (json.RawMessage, error) {

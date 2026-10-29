@@ -1,4 +1,4 @@
-module github.com/VulpineOS/foxbridge
+module github.com/chengwee/cdp-camoufox/foxbridge
 
 go 1.26.1
 

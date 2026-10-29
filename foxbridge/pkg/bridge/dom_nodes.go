@@ -28,10 +28,6 @@ type remoteObject struct {
 const domRegistryExpression = `(() => {
 	const ids = new WeakMap();
 	const nodes = new Map();
-	let revision = 0;
-	const observer = new MutationObserver(records => { revision += records.length; });
-	observer.observe(document, {subtree:true, childList:true, attributes:true, characterData:true});
-	const version = () => { revision += observer.takeRecords().length; return revision; };
 	let next = 0;
 	const id = node => {
 		if (!node || !node.nodeType) throw new Error('Not a DOM node');
@@ -43,8 +39,7 @@ const domRegistryExpression = `(() => {
 		if (!value || (value.nodeType !== 9 && !value.isConnected)) throw new Error('Node is detached');
 		return value;
 	};
-	const describe = (value, depth, accessibleOnly = false) => {
-		if (accessibleOnly && value.nodeType === 1 && getComputedStyle(value).display === 'none') return null;
+	const describe = (value, depth) => {
 		const result = {
 			localId: id(value), nodeType: value.nodeType, nodeName: value.nodeName,
 			localName: value.localName || '', nodeValue: value.nodeValue || '',
@@ -56,13 +51,13 @@ const domRegistryExpression = `(() => {
 			result.baseURL = value.baseURI;
 		}
 		if (depth !== 0) {
-			result.children = Array.from(value.childNodes, child => describe(child, depth - 1, accessibleOnly)).filter(Boolean);
-			if (value.shadowRoot) result.shadowRoots = [describe(value.shadowRoot, depth - 1, accessibleOnly)];
+			result.children = Array.from(value.childNodes, child => describe(child, depth - 1));
+			if (value.shadowRoot) result.shadowRoots = [describe(value.shadowRoot, depth - 1)];
 		}
 		if (value.nodeType === 11 && value.host) result.shadowRootType = 'open';
 		return result;
 	};
-	return {id, node, describe, document, version};
+	return {id, node, describe, document};
 })()`
 
 func decodeRemote(result json.RawMessage) (remoteObject, error) {
@@ -77,18 +72,6 @@ func decodeRemote(result json.RawMessage) (remoteObject, error) {
 		return remoteObject{}, fmt.Errorf("browser evaluation failed: %s", response.ExceptionDetails)
 	}
 	return response.Result, nil
-}
-
-func (b *Bridge) domVersion(document *domDocument) (int, error) {
-	object, err := b.callRegistry(document, `function(registry) { return registry.version(); }`, nil, true)
-	if err != nil {
-		return 0, err
-	}
-	var version int
-	if err := json.Unmarshal(object.Value, &version); err != nil {
-		return 0, err
-	}
-	return version, nil
 }
 
 func (b *Bridge) rememberRuntimeObject(sessionID, contextID string, result json.RawMessage) {
@@ -109,7 +92,7 @@ func (b *Bridge) domDocumentFor(sessionID, contextID string) (*domDocument, erro
 	if contextID == "" {
 		return nil, fmt.Errorf("execution context not available")
 	}
-	if frameID := b.frameIDForContext(contextID); frameID != "" {
+	if frameID := b.frameIDForContext(sessionID, contextID); frameID != "" {
 		if _, mainContext := b.contextForWorld(sessionID, frameID, ""); mainContext != "" {
 			contextID = mainContext
 		}
@@ -182,11 +165,10 @@ func (b *Bridge) registerDOMTree(document *domDocument, node map[string]interfac
 	}
 }
 
-func (b *Bridge) describeDOM(document *domDocument, localID, depth int, accessibleOnly ...bool) (map[string]interface{}, error) {
-	filterHidden := len(accessibleOnly) > 0 && accessibleOnly[0]
-	object, err := b.callRegistry(document, `function(registry, localId, depth, accessibleOnly) {
-		return registry.describe(localId ? registry.node(localId) : registry.document, depth, accessibleOnly);
-	}`, []map[string]interface{}{{"value": localID}, {"value": depth}, {"value": filterHidden}}, true)
+func (b *Bridge) describeDOM(document *domDocument, localID, depth int) (map[string]interface{}, error) {
+	object, err := b.callRegistry(document, `function(registry, localId, depth) {
+		return registry.describe(localId ? registry.node(localId) : registry.document, depth);
+	}`, []map[string]interface{}{{"value": localID}, {"value": depth}}, true)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +215,7 @@ func (b *Bridge) referenceForObject(sessionID, objectID string) (domNodeRef, err
 	}
 	if contextID != "" && contextID != document.contextID {
 		adopted, err := b.callJuggler(sessionID, "Page.adoptNode", map[string]interface{}{
-			"frameId": b.frameIDForContext(contextID), "objectId": objectID, "executionContextId": document.contextID,
+			"frameId": b.frameIDForContext(sessionID, contextID), "objectId": objectID, "executionContextId": document.contextID,
 		})
 		if err != nil {
 			return domNodeRef{}, err

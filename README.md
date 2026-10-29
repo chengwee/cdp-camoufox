@@ -1,3 +1,5 @@
+This is **CDP Camoufox**, a fork that maintains Camoufox and the Foxbridge CDP adapter together. See [CDP.md](CDP.md) for the custom browser requirement, build instructions, compatibility scope, and upstream update process.
+
 <img src="https://camoufox.com/static/banner.svg" align="center">
 
 <h1 align="center">Camoufox</h1>
