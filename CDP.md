@@ -30,6 +30,8 @@ The browser captures the tree and handles together. It exports ordinary document
 
 The extension is additive for existing Juggler clients: requests without `executionContextId` retain the original response behavior. Stagehand and other CDP clients do not need source changes. The tested subset and remaining limits are documented in `foxbridge/test/stagehand/README.md`; this is not a claim of complete Chrome DevTools Protocol parity.
 
+Driver evaluation uses the owning frame's document shell for its synchronous popup permission scope. It does not read privileged properties through the page's window reference, which can become cross-origin restricted. Object subtype checks use constructors from the debugger's captured global rather than the page's window reference. Worker evaluation has no document shell and does not enable this permission.
+
 ## Upstream updates
 
 Keep `main` as the clean upstream mirror and use `cdp` for integration. Preserve upstream paths, licenses, and notices. Put new bridge-specific files under `foxbridge/` and prefix custom workflows with `cdp-`.

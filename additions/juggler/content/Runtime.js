@@ -574,9 +574,9 @@ class Runtime {
       this._debugger.onDebuggerStatement = undefined;
   }
 
-  createExecutionContext(domWindow, contextGlobal, auxData) {
+  createExecutionContext(domWindow, contextGlobal, auxData, docShell = null) {
     // Note: domWindow is null for workers.
-    const context = new ExecutionContext(this, domWindow, contextGlobal, auxData);
+    const context = new ExecutionContext(this, domWindow, contextGlobal, auxData, docShell);
     this._executionContexts.set(context._id, context);
     if (domWindow)
       this._windowToExecutionContext.set(domWindow, context);
@@ -634,9 +634,10 @@ class Runtime {
 const driverPopupDepth = new WeakMap();
 
 class ExecutionContext {
-  constructor(runtime, domWindow, contextGlobal, auxData) {
+  constructor(runtime, domWindow, contextGlobal, auxData, docShell = null) {
     this._runtime = runtime;
     this._domWindow = domWindow;
+    this._docShell = docShell;
     this._contextGlobal = contextGlobal;
     this._debuggee = runtime._debugger.addDebuggee(contextGlobal);
     this._remoteObjects = new Map();
@@ -715,7 +716,7 @@ class ExecutionContext {
       this._mainWorldContext = new ExecutionContext(this._runtime, domWindow, domWindow, {
         frameId: this._auxData.frameId,
         name: '',
-      });
+      }, this._docShell);
     }
     return this._mainWorldContext;
   }
@@ -736,7 +737,7 @@ class ExecutionContext {
   // popup opened after an `await` inside the evaluated function is blocked,
   // exactly as it is on stock without an activation.
   withDriverPopups(fn) {
-    const docShell = this._domWindow?.docShell;
+    const docShell = this._docShell;
     if (!docShell || !('driverPopupsAllowed' in docShell))
       return fn();
     // Counted, not a plain boolean: one docShell carries both the isolated and
@@ -853,10 +854,16 @@ class ExecutionContext {
     return this._createRemoteObject(array);
   }
 
-  _instanceOf(debuggerObj, rawObj, className) {
-    if (this._domWindow)
-      return rawObj instanceof this._domWindow[className];
-    return this._debuggee.executeInGlobalWithBindings('o instanceof this[className]', {o: debuggerObj, className: this._debuggee.makeDebuggeeValue(className)}, {useInnerBindings: true}).return;
+  _instanceOf(debuggerObj, className) {
+    const descriptor = this._debuggee.getOwnPropertyDescriptor(className);
+    let constructor = descriptor.value;
+    if (descriptor.get) {
+      const completion = descriptor.get.call(this._debuggee);
+      if (!completion || !('return' in completion))
+        throw new Error('Failed to read ' + className + ' constructor');
+      constructor = completion.return;
+    }
+    return this._debuggee.executeInGlobalWithBindings('o instanceof constructor', {o: debuggerObj, constructor}, {useInnerBindings: true}).return;
   }
 
   _createRemoteObject(debuggerObj) {
@@ -874,27 +881,27 @@ class ExecutionContext {
         subtype = 'null';
       else if (typeof Node !== 'undefined' && Node.isInstance(rawObj))
         subtype = 'node';
-      else if (this._instanceOf(debuggerObj, rawObj, 'RegExp'))
+      else if (this._instanceOf(debuggerObj, 'RegExp'))
         subtype = 'regexp';
-      else if (this._instanceOf(debuggerObj, rawObj, 'Date'))
+      else if (this._instanceOf(debuggerObj, 'Date'))
         subtype = 'date';
-      else if (this._instanceOf(debuggerObj, rawObj, 'Map'))
+      else if (this._instanceOf(debuggerObj, 'Map'))
         subtype = 'map';
-      else if (this._instanceOf(debuggerObj, rawObj, 'Set'))
+      else if (this._instanceOf(debuggerObj, 'Set'))
         subtype = 'set';
-      else if (this._instanceOf(debuggerObj, rawObj, 'WeakMap'))
+      else if (this._instanceOf(debuggerObj, 'WeakMap'))
         subtype = 'weakmap';
-      else if (this._instanceOf(debuggerObj, rawObj, 'WeakSet'))
+      else if (this._instanceOf(debuggerObj, 'WeakSet'))
         subtype = 'weakset';
-      else if (this._instanceOf(debuggerObj, rawObj, 'Error'))
+      else if (this._instanceOf(debuggerObj, 'Error'))
         subtype = 'error';
-      else if (this._instanceOf(debuggerObj, rawObj, 'Promise'))
+      else if (this._instanceOf(debuggerObj, 'Promise'))
         subtype = 'promise';
-      else if ((this._instanceOf(debuggerObj, rawObj, 'Int8Array')) || (this._instanceOf(debuggerObj, rawObj, 'Uint8Array')) ||
-               (this._instanceOf(debuggerObj, rawObj, 'Uint8ClampedArray')) || (this._instanceOf(debuggerObj, rawObj, 'Int16Array')) ||
-               (this._instanceOf(debuggerObj, rawObj, 'Uint16Array')) || (this._instanceOf(debuggerObj, rawObj, 'Int32Array')) ||
-               (this._instanceOf(debuggerObj, rawObj, 'Uint32Array')) || (this._instanceOf(debuggerObj, rawObj, 'Float32Array')) ||
-               (this._instanceOf(debuggerObj, rawObj, 'Float64Array'))) {
+      else if ((this._instanceOf(debuggerObj, 'Int8Array')) || (this._instanceOf(debuggerObj, 'Uint8Array')) ||
+               (this._instanceOf(debuggerObj, 'Uint8ClampedArray')) || (this._instanceOf(debuggerObj, 'Int16Array')) ||
+               (this._instanceOf(debuggerObj, 'Uint16Array')) || (this._instanceOf(debuggerObj, 'Int32Array')) ||
+               (this._instanceOf(debuggerObj, 'Uint32Array')) || (this._instanceOf(debuggerObj, 'Float32Array')) ||
+               (this._instanceOf(debuggerObj, 'Float64Array'))) {
         subtype = 'typedarray';
       }
       return {objectId, type, subtype};

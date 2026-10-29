@@ -40,6 +40,10 @@ before(async () => {
       response.end(
         '<!doctype html><title>Hidden frame test</title><p>Visible parent</p><iframe id="hidden" style="display:none" src="/frame"></iframe>',
       );
+    } else if (request.url === "/sandboxed-frames") {
+      response.end(
+        `<!doctype html><title>Sandboxed frame test</title><iframe id="sandboxed" sandbox="allow-scripts" src="http://127.0.0.1:${crossOriginServer.address().port}/frame"></iframe>`,
+      );
     } else if (request.url?.startsWith("/load-fixture")) {
       response.end(
         '<!doctype html><title>Loading fixture</title><iframe src="/frame"></iframe><img src="/slow-image">',
@@ -317,6 +321,83 @@ test(
       returnByValue: true,
     });
     assert.equal(result.result.value, "undefined");
+  },
+);
+
+test(
+  "sandboxed cross-origin frames support expression and function evaluation",
+  { timeout: 20000 },
+  async () => {
+    await page.goto(`${fixtureUrl}sandboxed-frames`, { waitUntil: "load" });
+    const frame = await page.frameLocator("#sandboxed").resolveFrame();
+    const { executionContextId } = await page.sendCDP("Page.createIsolatedWorld", {
+      frameId: frame.frameId,
+      worldName: "sandboxed-frame-world",
+    });
+    const evaluated = await page.sendCDP("Runtime.evaluate", {
+      contextId: executionContextId,
+      expression: "document.title",
+      returnByValue: true,
+    });
+    assert.equal(evaluated.result.value, "Frame");
+    const called = await page.sendCDP("Runtime.callFunctionOn", {
+      executionContextId,
+      functionDeclaration: "function() { return document.querySelector('#frame-name').tagName; }",
+      arguments: [],
+      returnByValue: true,
+    });
+    assert.equal(called.result.value, "INPUT");
+    for (const [expression, subtype] of [
+      ["({plain: true})", undefined],
+      ["new RegExp('frame')", "regexp"],
+      [
+        "(() => { const original = RegExp; Object.defineProperty(globalThis, 'RegExp', {get() { return original; }, configurable: true}); return new original('accessor'); })()",
+        "regexp",
+      ],
+      ["new Date(0)", "date"],
+      ["new Map()", "map"],
+      ["new Set()", "set"],
+      ["new WeakMap()", "weakmap"],
+      ["new WeakSet()", "weakset"],
+      ["new TypeError('frame')", "error"],
+      ["new Uint8Array(2)", "typedarray"],
+    ]) {
+      const object = await page.sendCDP("Runtime.evaluate", {
+        contextId: executionContextId,
+        expression,
+        returnByValue: false,
+        awaitPromise: false,
+      });
+      assert.equal(object.result.subtype, subtype, expression);
+      await page.sendCDP("Runtime.releaseObject", { objectId: object.result.objectId });
+    }
+    const snapshot = await page.snapshot();
+    assert.ok(snapshot.formattedTree.includes("Confirm in frame"), snapshot.formattedTree);
+    await page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          const child = document.querySelector("#sandboxed");
+          child.addEventListener("load", resolve, { once: true });
+          child.src = "/frame";
+        }),
+    );
+    await assert.rejects(
+      page.sendCDP("Runtime.evaluate", {
+        contextId: executionContextId,
+        expression: "document.title",
+        returnByValue: true,
+      }),
+    );
+    const replacement = await page.sendCDP("Page.createIsolatedWorld", {
+      frameId: frame.frameId,
+      worldName: "sandboxed-frame-world",
+    });
+    const navigated = await page.sendCDP("Runtime.evaluate", {
+      contextId: replacement.executionContextId,
+      expression: "location.port",
+      returnByValue: true,
+    });
+    assert.equal(navigated.result.value, new URL(fixtureUrl).port);
   },
 );
 

@@ -575,7 +575,7 @@ class Frame {
       const world = this._runtime.createExecutionContext(domWindow, domWindow, {
         frameId: this.id(),
         name,
-      });
+      }, this.docShell());
       this._worldNameToContext.set(name, world);
       return world;
     }
@@ -630,7 +630,7 @@ class Frame {
     const world = this._runtime.createExecutionContext(this.domWindow(), sandbox, {
       frameId: this.id(),
       name,
-    });
+    }, this.docShell());
     // Camoufox: give the default world a main-world twin for the `mw:` escape
     // hatch (Runtime.js). Only the default world gets one -- that is where
     // page.evaluate() lands; Playwright's own utility world has no business
@@ -896,6 +896,5 @@ function channelId(channel) {
   }
   return helper.generateId();
 }
-
 
 
